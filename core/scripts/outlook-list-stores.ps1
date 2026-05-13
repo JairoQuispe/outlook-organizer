@@ -5,7 +5,10 @@ param (
     [switch]$PreserveSession,
     [Parameter(Mandatory=$false)]
     [ValidateSet('ExchangeOnline','OST','PST')]
-    [string]$StoreType
+    [string]$StoreType,
+    [Parameter(Mandatory=$false)]
+    [ValidateSet('Json','Text')]
+    [string]$ExportResult = 'Json'
 )
 
 function Format-StoreBytes {
@@ -206,20 +209,52 @@ if ($MyInvocation.InvocationName -ne ".") {
             Write-Verbose ("Filtrando StoreType='{0}'. Coincidencias: {1}. Sin clasificar: {2}." -f $StoreType, ($stores.Count), ($storesWithoutType.Count))
         }
 
-        if ($Json) {
+        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $baseFileName = "list-store-$timestamp"
+        $cwd = (Get-Location).Path
+        $shouldExportJson = $ExportResult -eq 'Json'
+        $shouldExportText = $ExportResult -eq 'Text'
+        $shouldEmitJsonConsole = $Json
+        $shouldEmitTextConsole = -not $Json
+
+        if ($shouldEmitJsonConsole -or $shouldExportJson) {
             $payload = [pscustomobject]@{
                 type = "stores"
                 stores = $stores
             }
-            Write-Output ($payload | ConvertTo-Json -Compress -Depth 6)
-        } else {
+            $jsonOutput = $payload | ConvertTo-Json -Compress -Depth 6
+            if ($shouldEmitJsonConsole) {
+                Write-Output $jsonOutput
+            }
+            if ($shouldExportJson) {
+                $jsonPath = Join-Path -Path $cwd -ChildPath "$baseFileName.json"
+                $jsonOutput | Out-File -FilePath $jsonPath -Encoding UTF8
+                Write-Verbose "Resultado exportado en JSON: $jsonPath"
+            }
+        }
+
+        $plainLines = $null
+        if ($shouldEmitTextConsole -or $shouldExportText) {
+            $plainLines = New-Object System.Collections.Generic.List[string]
             $i = 1
             foreach ($s in $stores) {
                 $pathDisplay = if ($s.filePath) { $s.filePath } else { "Modo Online / Sin ruta local" }
                 $idDisplay = if ($s.storeId) { $s.storeId } else { "Sin StoreID" }
-                Write-Output "[$i] $($s.displayName) - ID: $idDisplay - ($pathDisplay)"
+                $line = "[$i] $($s.displayName) - ID: $idDisplay - ($pathDisplay)"
+                if ($shouldEmitTextConsole) {
+                    Write-Output $line
+                }
+                if ($shouldExportText) {
+                    $plainLines.Add($line) | Out-Null
+                }
                 $i++
             }
+        }
+
+        if ($shouldExportText -and $plainLines -and $plainLines.Count -gt 0) {
+            $textPath = Join-Path -Path $cwd -ChildPath "$baseFileName.txt"
+            $plainLines | Out-File -FilePath $textPath -Encoding UTF8
+            Write-Verbose "Resultado exportado en texto: $textPath"
         }
     } catch {
         if ($Json) {

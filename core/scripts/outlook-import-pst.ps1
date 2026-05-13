@@ -44,9 +44,6 @@ param (
     [string[]]$IncludeFolders,
 
     [Parameter(Mandatory=$false)]
-    [switch]$ListFolders,
-
-    [Parameter(Mandatory=$false)]
     [switch]$Json,
 
     [Parameter(Mandatory=$false)]
@@ -204,46 +201,6 @@ function Emit-ErrorPayload {
     }
 }
 
-function Emit-ScanProgress {
-    param(
-        [string]$Phase,
-        [string]$FolderPath,
-        [int]$CurrentItemCount,
-        [switch]$FolderCompleted
-    )
-
-    if (-not $script:ScanState) { return }
-
-    $elapsedMs = [long](([DateTime]::UtcNow - $script:ScanState.startedAt).TotalMilliseconds)
-    $totalFolders = [int]$script:ScanState.totalFolders
-    $scannedFolders = [int]$script:ScanState.scannedFolders
-    $percent = 0
-    if ($totalFolders -gt 0) {
-        $percent = [int][Math]::Floor(($scannedFolders * 100.0) / $totalFolders)
-        if ($percent -gt 100) { $percent = 100 }
-    }
-
-    $payload = @{
-        type = "scanProgress"
-        phase = $Phase
-        folderPath = $FolderPath
-        currentItemCount = [int]$CurrentItemCount
-        folderCompleted = [bool]$FolderCompleted
-        scannedFolders = $scannedFolders
-        totalFolders = $totalFolders
-        accumulatedItems = [long]$script:ScanState.accumulatedItems
-        percent = $percent
-        elapsedMs = $elapsedMs
-        pstSizeBytes = [long]$script:ScanState.pstSizeBytes
-    }
-
-    if ($Json -or $script:IsHeadlessOutput) {
-        [Console]::WriteLine(($payload | ConvertTo-Json -Compress -Depth 6))
-    } else {
-        Write-Host ("[scan] {0}% {1}/{2} folder={3} items={4}" -f $percent, $scannedFolders, $totalFolders, $FolderPath, $CurrentItemCount)
-    }
-}
-
 function Format-Bytes {
     param ($bytes)
     if ($bytes -ge 1GB) { return "{0:N2} GB" -f ($bytes / 1GB) }
@@ -281,131 +238,6 @@ function Has-SelectedDescendant {
         if ($sel.StartsWith("$fp\")) { return $true }
     }
     return $false
-}
-
-function Collect-PstFoldersRecursive {
-    param($folder, [string]$pathPrefix, [ref]$out)
-    $folderPath = $null
-    try {
-        $folderPath = if ($pathPrefix) { "$pathPrefix\$($folder.Name)" } else { $folder.Name }
-        $count = 0
-        $yearCounts = @{}
-        $usedTable = $false
-        try {
-            $table = $folder.GetTable("")
-            $table.Columns.RemoveAll()
-            $table.Columns.Add("ReceivedTime") | Out-Null
-            $table.Columns.Add("CreationTime") | Out-Null
-            try { $table.Columns.Add("SentOn") | Out-Null } catch {}
-            try { $table.Columns.Add("LastModificationTime") | Out-Null } catch {}
-
-            while (-not $table.EndOfTable) {
-                $rows = $table.GetNextRows(300)
-                foreach ($row in $rows) {
-                    $count++
-                    if (($count % 2000) -eq 0) {
-                        Emit-ScanProgress -Phase "folder_scan" -FolderPath $folderPath -CurrentItemCount $count
-                    }
-                    $d = $row["ReceivedTime"]
-                    if (-not $d) { $d = $row["CreationTime"] }
-                    if (-not $d) {
-                        try { $d = $row["SentOn"] } catch {}
-                    }
-                    if (-not $d) {
-                        try { $d = $row["LastModificationTime"] } catch {}
-                    }
-                    if ($d) {
-                        $y = [int]$d.Year
-                        if ($yearCounts.ContainsKey($y)) {
-                            $yearCounts[$y]++
-                        } else {
-                            $yearCounts[$y] = 1
-                        }
-                    }
-                }
-            }
-            $usedTable = $true
-        } catch {
-            try {
-                $count = [int]$folder.Items.Count
-            } catch {}
-        }
-
-        if (-not $usedTable) {
-            try {
-                $scanCount = 0
-                foreach ($item in $folder.Items) {
-                    $d = $null
-                    $scanCount++
-                    if (($scanCount % 2000) -eq 0) {
-                        Emit-ScanProgress -Phase "folder_scan" -FolderPath $folderPath -CurrentItemCount $scanCount
-                    }
-                    try { $d = $item.ReceivedTime } catch {}
-                    if (-not $d) {
-                        try { $d = $item.CreationTime } catch {}
-                    }
-                    if (-not $d) {
-                        try { $d = $item.SentOn } catch {}
-                    }
-                    if (-not $d) {
-                        try { $d = $item.LastModificationTime } catch {}
-                    }
-                    if ($d) {
-                        $y = [int]$d.Year
-                        if ($yearCounts.ContainsKey($y)) {
-                            $yearCounts[$y]++
-                        } else {
-                            $yearCounts[$y] = 1
-                        }
-                    }
-                }
-            } catch {}
-        }
-
-        $yearBreakdown = @()
-        foreach ($y in ($yearCounts.Keys | Sort-Object -Descending)) {
-            $yearBreakdown += [pscustomobject]@{
-                year = [int]$y
-                count = [int]$yearCounts[$y]
-            }
-        }
-
-        $datedCount = 0
-        foreach ($k in $yearCounts.Keys) {
-            $datedCount += [int]$yearCounts[$k]
-        }
-        $undatedCount = [int]([Math]::Max(0, $count - $datedCount))
-
-        $out.Value += [pscustomobject]@{
-            type = "folder"
-            path = $folderPath
-            itemCount = $count
-            yearBreakdown = @($yearBreakdown)
-            undatedCount = $undatedCount
-        }
-
-        if ($script:ScanState) {
-            $script:ScanState.scannedFolders = [int]$script:ScanState.scannedFolders + 1
-            $script:ScanState.accumulatedItems = [long]$script:ScanState.accumulatedItems + [long]$count
-            Emit-ScanProgress -Phase "folder_done" -FolderPath $folderPath -CurrentItemCount $count -FolderCompleted
-        }
-
-        foreach ($sub in (Get-SubFolders-Safe -parentFolder $folder)) {
-            Collect-PstFoldersRecursive -folder $sub -pathPrefix $folderPath -out $out
-        }
-    } catch {
-        $pathLabel = if ($folderPath) { " '$folderPath'" } else { "" }
-        Emit-Log "warn" "Error recorriendo$pathLabel: $($_.Exception.Message)"
-    }
-}
-
-function Count-PstFoldersRecursive {
-    param($folder)
-    $count = 1
-    foreach ($sub in (Get-SubFolders-Safe -parentFolder $folder)) {
-        $count += Count-PstFoldersRecursive -folder $sub
-    }
-    return [int]$count
 }
 
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
@@ -1034,7 +866,7 @@ function Build-DuplicateIndexFromFolder {
             $toDate = $fromDate.AddYears(1)
             $fromLiteral = $fromDate.ToString("yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
             $toLiteral = $toDate.ToString("yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
-            $tableFilter = "@SQL=\"\"urn:schemas:httpmail:datereceived\"\" >= '$fromLiteral' AND \"\"urn:schemas:httpmail:datereceived\"\" < '$toLiteral'"
+            $tableFilter = "@SQL=`"urn:schemas:httpmail:datereceived`" >= '$fromLiteral' AND `"urn:schemas:httpmail:datereceived`" < '$toLiteral'"
             Emit-Log "info" "  GetTable con filtro anio=$FilterOnlyYear..."
         } else {
             Emit-Log "info" "  GetTable iniciando..."
@@ -1356,54 +1188,6 @@ $script:PstStoreRef = $pstStore
 
 $pstRoot = $pstStore.GetRootFolder()
 $script:PstRootRef = $pstRoot
-
-if ($ListFolders) {
-    $pstSizeBytes = 0
-    try {
-        $pstSizeBytes = [long](Get-Item -LiteralPath $PstPath -ErrorAction Stop).Length
-    } catch {}
-
-    $totalFoldersToScan = 0
-    foreach ($tf in (Get-SubFolders-Safe -parentFolder $pstRoot)) {
-        $totalFoldersToScan += Count-PstFoldersRecursive -folder $tf
-    }
-
-    $script:ScanState = @{
-        totalFolders = [int]$totalFoldersToScan
-        scannedFolders = 0
-        accumulatedItems = [long]0
-        pstSizeBytes = [long]$pstSizeBytes
-        startedAt = [DateTime]::UtcNow
-    }
-
-    if ($Json) {
-        Write-Output (@{
-            type = "scanMeta"
-            pstPath = $PstPath
-            pstSizeBytes = [long]$pstSizeBytes
-            totalFolders = [int]$totalFoldersToScan
-        } | ConvertTo-Json -Compress -Depth 6)
-    } else {
-        Emit-Log "info" "Escaneando PST... Carpetas estimadas: $totalFoldersToScan"
-    }
-
-    $flat = [ref]@()
-    foreach ($tf in (Get-SubFolders-Safe -parentFolder $pstRoot)) {
-        Collect-PstFoldersRecursive -folder $tf -pathPrefix "" -out $flat
-    }
-
-    Emit-ScanProgress -Phase "completed" -FolderPath "" -CurrentItemCount 0 -FolderCompleted
-
-    [Console]::WriteLine((@{ type = "folders"; count = @($flat.Value).Count } | ConvertTo-Json -Compress -Depth 6))
-    foreach ($f in $flat.Value) {
-        [Console]::WriteLine(($f | ConvertTo-Json -Compress -Depth 6))
-    }
-
-    if (-not $alreadyMounted) {
-        try { $namespace.RemoveStore($pstRoot) } catch {}
-    }
-    Exit-WithCleanup 0
-}
 
 if (-not $TargetStoreId) { Emit-ErrorPayload "Se requiere -TargetStoreId."; Exit-WithCleanup 1 }
 
