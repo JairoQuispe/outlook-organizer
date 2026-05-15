@@ -44,6 +44,9 @@ param (
     [string[]]$IncludeFolders,
 
     [Parameter(Mandatory=$false)]
+    [string]$FolderPlanPath,
+
+    [Parameter(Mandatory=$false)]
     [switch]$Json,
 
     [Parameter(Mandatory=$false)]
@@ -123,6 +126,12 @@ $script:PstRootRef = $null
 $script:TargetStoreRef = $null
 $script:TargetRootRef = $null
 $script:FilterOnlyMonthLookup = $null
+$script:FolderPlanContext = @{
+    enabled = $false
+    entries = @()
+    totalItems = 0
+    currentEntry = $null
+}
 
 function Cleanup-ComResources {
     if ($script:ChildFolderCache) {
@@ -378,6 +387,63 @@ if ($SelectedFolderFilters.Count -gt 0) {
     $SelectedFolderFilters = @($SelectedFolderFilters | Sort-Object -Unique)
 }
 
+$planEntries = @()
+$usingFolderPlan = $false
+if ($FolderPlanPath) {
+    if (-not (Test-Path -LiteralPath $FolderPlanPath)) {
+        Emit-ErrorPayload "No se encontró el archivo especificado en -FolderPlanPath: $FolderPlanPath"
+        Exit-WithCleanup 1
+    }
+
+    try {
+        $planContent = Get-Content -LiteralPath $FolderPlanPath -Raw -ErrorAction Stop
+        $planJson = $planContent | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Emit-ErrorPayload "No se pudo leer el plan de carpetas (-FolderPlanPath): $($_.Exception.Message)"
+        Exit-WithCleanup 1
+    }
+
+    if (-not $planJson -or -not $planJson.folders) {
+        Emit-ErrorPayload "El archivo de plan no contiene 'folders'."
+        Exit-WithCleanup 1
+    }
+
+    if ($planJson.type -and $planJson.type -ne "folderExport") {
+        Emit-Log "warn" "-FolderPlanPath tiene type='$($planJson.type)' (se esperaba 'folderExport'). Continuando."
+    }
+
+    foreach ($entry in @($planJson.folders)) {
+        $path = "" + $entry.path
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        $itemCount = 0
+        try { $itemCount = [int]$entry.itemCount } catch { $itemCount = 0 }
+        $normalized = Normalize-FolderPath $path
+        $planEntries += [pscustomobject]@{
+            path = $path.Trim().Replace("/", "\").Trim("\")
+            normalizedPath = $normalized
+            itemCount = [int][math]::Max(0, $itemCount)
+        }
+    }
+
+    if ($planEntries.Count -eq 0) {
+        Emit-ErrorPayload "El plan importado no contiene carpetas válidas."
+        Exit-WithCleanup 1
+    }
+
+    $planTotalItems = ($planEntries | Measure-Object -Property itemCount -Sum).Sum
+    if (-not $planTotalItems) { $planTotalItems = 0 }
+
+    $script:FolderPlanContext = @{
+        enabled = $true
+        entries = $planEntries
+        totalItems = [int]$planTotalItems
+        currentEntry = $null
+    }
+    $usingFolderPlan = $true
+
+    $SelectedFolderFilters = @($SelectedFolderFilters + ($planEntries | ForEach-Object { $_.normalizedPath }) | Sort-Object -Unique)
+}
+
 $script:TokenBucket = @{
     capacity    = [double]$BurstSize
     tokens      = [double]$BurstSize
@@ -542,6 +608,104 @@ function Get-StoreByIdOrPath {
 function Get-SubFolders-Safe {
     param($parentFolder)
     try { return $parentFolder.Folders } catch { return @() }
+}
+
+function Get-NormalizedFolderSegments {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return @() }
+
+    $clean = $Path.Trim().Replace("/", "\").Trim("\")
+    if ([string]::IsNullOrWhiteSpace($clean)) { return @() }
+
+    [string[]]$parts = $clean -split '\\'
+    $segments = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($p in $parts) {
+        $trimmed = $p.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+            $segments.Add($trimmed)
+        }
+    }
+
+    return ,$segments.ToArray()
+}
+
+function Get-FolderParentPathString {
+    param([string]$Path)
+    $segments = Get-NormalizedFolderSegments -Path $Path
+    if ($segments.Count -le 1) { return "" }
+    return ($segments[0..($segments.Count - 2)] -join "\")
+}
+
+function Get-PstFolderByPath {
+    param($rootFolder, [string]$FolderPath)
+
+    if (-not $rootFolder) { return $null }
+    $segments = Get-NormalizedFolderSegments -Path $FolderPath
+    if ($segments.Count -eq 0) { return $null }
+
+    $current = $rootFolder
+    foreach ($segment in $segments) {
+        $segmentNorm = Normalize-FolderName $segment
+        if ([string]::IsNullOrWhiteSpace($segmentNorm)) { return $null }
+
+        $found = $null
+
+        # Strategy 1: direct COM Folders.Item() by exact name (fast, keeps COM ref alive)
+        try {
+            $folders = $current.Folders
+            $direct = $folders.Item($segment)
+            if ($direct) {
+                $directNorm = Normalize-FolderName ([string]$direct.Name)
+                if ($directNorm -eq $segmentNorm) {
+                    $found = $direct
+                }
+            }
+        } catch {}
+
+        # Strategy 2: enumerate children (handles name normalization differences)
+        if (-not $found) {
+            try {
+                $folders = $current.Folders
+                $count = $folders.Count
+                for ($idx = 1; $idx -le $count; $idx++) {
+                    $child = $null
+                    try { $child = $folders.Item($idx) } catch { continue }
+                    if (-not $child) { continue }
+                    $childName = $null
+                    try { $childName = [string]$child.Name } catch { continue }
+                    if (Normalize-FolderName $childName -eq $segmentNorm) {
+                        $found = $child
+                        break
+                    }
+                }
+            } catch {}
+        }
+
+        if (-not $found) {
+            Emit-Log "warn" "Carpeta '$FolderPath': segmento '$segment' no encontrado en el PST."
+            return $null
+        }
+        $current = $found
+    }
+
+    return $current
+}
+
+function Resolve-TargetFolderByPath {
+    param($targetStore, $targetRoot, [string]$SourcePath)
+
+    $segments = Get-NormalizedFolderSegments -Path $SourcePath
+    if ($segments.Count -eq 0) { return $targetRoot }
+
+    $dest = Resolve-TargetTopFolder -targetStore $targetStore -targetRoot $targetRoot -SourceTopName $segments[0]
+    if (-not $dest) { return $null }
+
+    for ($i = 1; $i -lt $segments.Length; $i++) {
+        $dest = Ensure-ChildFolder -parent $dest -Name $segments[$i]
+    }
+
+    return $dest
 }
 
 function Normalize-FolderName {
@@ -981,7 +1145,8 @@ function Restore-FolderRecursive {
         $sourceFolder,
         $destFolder,
         [string]$pathPrefix,
-        [ref]$stats
+        [ref]$stats,
+        [switch]$SkipSubfolders
     )
     $folderPath = if ($pathPrefix) { "$pathPrefix\$($sourceFolder.Name)" } else { $sourceFolder.Name }
     $activity = if ($Action -ieq "Move") { "Moviendo" } else { "Copiando" }
@@ -997,6 +1162,9 @@ function Restore-FolderRecursive {
         Emit-Log "info" "Indexando duplicados en: $folderPath"
         $existingKeys = Build-DuplicateIndex -targetFolder $destFolder -Deep:$DeepDuplicateCheck
         Emit-Log "info" "Indice inicial: $($existingKeys.Count) claves existentes + $($script:RuntimeDupKeys.Count) runtime$(if ($DeepDuplicateCheck) { ' (deep)' })"
+    }
+    if (-not $existingKeys) {
+        $existingKeys = New-Object 'System.Collections.Generic.HashSet[string]'
     }
 
     $items = $null
@@ -1016,6 +1184,19 @@ function Restore-FolderRecursive {
             $item = $null
             try { $item = $items.Item($i) } catch { continue }
             if (-not $item) { continue }
+
+            if ($script:FolderPlanContext.enabled -and $script:FolderPlanContext.currentEntry) {
+                $entry = $script:FolderPlanContext.currentEntry
+                $entry.seen++
+                $folderExpected = [int][Math]::Max(0, $entry.itemCount)
+                $folderSeen = [int][Math]::Max(0, $entry.seen)
+                $folderDenominator = if ($folderExpected -gt 0) { [int][Math]::Max($folderExpected, $folderSeen) } else { [int][Math]::Max($itemCount, $folderSeen) }
+                $folderPercent = 0
+                if ($folderDenominator -gt 0) {
+                    $folderPercent = [int][Math]::Min(100, [Math]::Round(($folderSeen / [double]$folderDenominator) * 100))
+                }
+                Emit-Log "info" ("carpeta {0} - item {1} de {2} - cargando {3}%" -f $entry.path, $folderSeen, $folderDenominator, $folderPercent)
+            }
 
             $itemDate = $null
 
@@ -1147,6 +1328,8 @@ function Restore-FolderRecursive {
     # This ensures all existing dest subfolders are in cache before any .Add() calls
     [void](Index-ChildFolders -parent $destFolder)
 
+    if ($SkipSubfolders) { return }
+
     # Snapshot source subfolders into array to avoid COM enumerator invalidation
     $sourceSubFolders = @()
     foreach ($sub in (Get-SubFolders-Safe -parentFolder $sourceFolder)) {
@@ -1158,6 +1341,60 @@ function Restore-FolderRecursive {
         try { $subName = [string]$sub.Name } catch { continue }
         $destSub = Ensure-ChildFolder -parent $destFolder -Name $subName
         Restore-FolderRecursive -sourceFolder $sub -destFolder $destSub -pathPrefix $folderPath -stats $stats
+    }
+}
+
+function Restore-FoldersFromPlan {
+    param(
+        $planEntries,
+        $pstRoot,
+        $targetStore,
+        $targetRoot,
+        [ref]$stats
+    )
+
+    $totalEntries = $planEntries.Count
+    $index = 0
+    foreach ($entry in $planEntries) {
+        $index++
+        $path = $entry.path
+        $declaredItems = [int][Math]::Max(0, $entry.itemCount)
+        Emit-Log "info" ("Plan {0}/{1}: {2} (items declarados: {3})" -f $index, $totalEntries, $path, $declaredItems)
+
+        $sourceFolder = Get-PstFolderByPath -rootFolder $pstRoot -FolderPath $path
+        if (-not $sourceFolder) {
+            Emit-Log "warn" "Carpeta '$path' no existe en el PST. Se omite."
+            if ($stats.Value.total -gt 0 -and $declaredItems -gt 0) {
+                $stats.Value.total = [int][Math]::Max(0, $stats.Value.total - $declaredItems)
+            }
+            continue
+        }
+
+        $destFolder = Resolve-TargetFolderByPath -targetStore $targetStore -targetRoot $targetRoot -SourcePath $path
+        if (-not $destFolder) {
+            Emit-Log "error" "No se pudo resolver carpeta destino para '$path'."
+            if ($stats.Value.total -gt 0 -and $declaredItems -gt 0) {
+                $stats.Value.total = [int][Math]::Max(0, $stats.Value.total - $declaredItems)
+            }
+            continue
+        }
+
+        $script:FolderPlanContext.currentEntry = @{
+            path = $path
+            itemCount = $declaredItems
+            seen = 0
+            index = $index
+            totalEntries = $totalEntries
+        }
+
+        $parentPath = Get-FolderParentPathString -Path $path
+        if ($declaredItems -le 0) {
+            Emit-Log "info" "Carpeta '$path' en plan reporta 0 ítems, se omite procesamiento."
+        } else {
+            Restore-FolderRecursive -sourceFolder $sourceFolder -destFolder $destFolder -pathPrefix $parentPath -stats $stats -SkipSubfolders
+        }
+
+        $script:FolderPlanContext.currentEntry = $null
     }
 }
 
@@ -1199,14 +1436,22 @@ if (-not $targetStore) {
 $script:TargetStoreRef = $targetStore
 Emit-Log "info" "Buzón destino: $($targetStore.DisplayName)"
 
-Emit-Log "info" "Contando ítems del PST (para progreso)..."
-$totalItems = [ref]0
-$totalBytes = [ref]([long]0)
-$folderList = [ref]@()
-foreach ($tf in (Get-SubFolders-Safe -parentFolder $pstRoot)) {
-    Analyze-PstFolderRecursive -folder $tf -pathPrefix "" -totalItems $totalItems -totalBytes $totalBytes -folderList $folderList
+if ($usingFolderPlan) {
+    Emit-Log "info" "Usando plan exportado: saltando análisis completo."
+    $totalItems = [ref]([int]$script:FolderPlanContext.totalItems)
+    $totalBytes = [ref]([long]0)
+    $folderList = [ref]@($planEntries)
+    Emit-Log "info" "Total ítems planificados: $($totalItems.Value)"
+} else {
+    Emit-Log "info" "Contando ítems del PST (para progreso)..."
+    $totalItems = [ref]0
+    $totalBytes = [ref]([long]0)
+    $folderList = [ref]@()
+    foreach ($tf in (Get-SubFolders-Safe -parentFolder $pstRoot)) {
+        Analyze-PstFolderRecursive -folder $tf -pathPrefix "" -totalItems $totalItems -totalBytes $totalBytes -folderList $folderList
+    }
+    Emit-Log "info" "Total ítems a procesar: $($totalItems.Value)"
 }
-Emit-Log "info" "Total ítems a procesar: $($totalItems.Value)"
 
 $stats = [ref]@{
     copied = 0
@@ -1227,9 +1472,13 @@ $script:TargetRootRef = $targetRoot
 Emit-Log "info" "Pre-indexando carpetas destino..."
 [void](Index-ChildFolders -parent $targetRoot)
 
-foreach ($sourceTop in (Get-SubFolders-Safe -parentFolder $pstRoot)) {
-    $destTop = Resolve-TargetTopFolder -targetStore $targetStore -targetRoot $targetRoot -SourceTopName $sourceTop.Name
-    Restore-FolderRecursive -sourceFolder $sourceTop -destFolder $destTop -pathPrefix "" -stats $stats
+if ($usingFolderPlan) {
+    Restore-FoldersFromPlan -planEntries $planEntries -pstRoot $pstRoot -targetStore $targetStore -targetRoot $targetRoot -stats $stats
+} else {
+    foreach ($sourceTop in (Get-SubFolders-Safe -parentFolder $pstRoot)) {
+        $destTop = Resolve-TargetTopFolder -targetStore $targetStore -targetRoot $targetRoot -SourceTopName $sourceTop.Name
+        Restore-FolderRecursive -sourceFolder $sourceTop -destFolder $destTop -pathPrefix "" -stats $stats
+    }
 }
 
 Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "Completado" -PercentComplete 100 -Completed -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed

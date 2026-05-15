@@ -16,7 +16,7 @@
 | Flag | Tipo | Descripción |
 |------|------|-------------|
 | `-PstPath` | `string` | Ruta completa al archivo PST que se montará. |
-| `-TargetStoreId` | `string` | StoreID del buzón destino (obtén los IDs con `outlook-list-stores.ps1`). |
+| `-TargetStoreId` | `string` | StoreID del buzón destino (obtén los IDs con `outlook-list-stores.ps1`). El mismo identificador puede usarse con `outlook-scan-pst.ps1 -StoreId`. |
 | `-Action` | `Copy`/`Move` (default `Copy`) | Controla si los ítems se copian o se mueven del PST al buzón. |
 
 ## Filtros de contenido
@@ -27,9 +27,9 @@
 | `-FilterOnlyMonths` | `string` (ej. `"ene,feb,jun"`) | Acepta números o nombres/abreviaturas (en español o inglés). Se normaliza y se compara vía hashset. |
 | `-IncludeFolders` | `string[]` | Lista simple de rutas relativas dentro del PST. Ej: `"Inbox/Clientes"`. |
 | `-IncludeFoldersJson` | `string` (JSON array) | Versión serializada para integraciones. Ej: `'["Inbox/Clientes","Archivo\\2024"]'`. |
+| `-FolderPlanPath` | `string` (ruta a JSON) | Toma el archivo generado por `outlook-scan-pst.ps1 -ExportFolders` y recorre sus carpetas en orden, usando los `itemCount` exportados para calcular progreso en tiempo real. |
 | `-SkipDuplicates` | `switch` | Construye un índice de duplicados (Message-ID, SearchKey o clave compuesta) y omite coincidencias Encontradas. |
 | `-DeepDuplicateCheck` | `switch` | Cuando se usa con `-SkipDuplicates`, también indexa subcarpetas destino para claves existentes. |
-| `-ListFolders` | `switch` | No importa datos; recorre el PST y emite metadatos + lista plana de carpetas (útil para explorar antes de importar). |
 
 ## Control de rendimiento y reintentos
 
@@ -79,12 +79,32 @@ pwsh -File scripts-powershell/outlook-import-pst.ps1 `
   -SkipDuplicates -DeepDuplicateCheck
 ```
 
-#### 3. Sólo listar carpetas
+#### 3. Importar usando un plan exportado de `outlook-scan-pst.ps1`
 ```powershell
 pwsh -File scripts-powershell/outlook-import-pst.ps1 `
   -PstPath "C:\PSTs\archivo.pst" `
-  -ListFolders -Json
+  -TargetStoreId "00000000C..." `
+  -FolderPlanPath "scan-year-2023-pst-archivo-with-size-20250512-183000.json" `
+  -SkipDuplicates
 ```
+
+- El importador recorre las carpetas exactamente en el orden definido en el JSON.
+- Cada ítem muestra logs del estilo `carpeta Inbox/Clientes - item 320 de 640 - cargando 50%`, basados en `itemCount` exportado, útil para estimar ETA en scripts externos.
+
+### Listar carpetas antes de importar
+
+Para explorar un PST sin ejecutar el importador (ya sea por ruta o por StoreId existente), usa el nuevo script dedicado:
+
+```powershell
+pwsh -File scripts-powershell/outlook-scan-pst.ps1 \
+  [-PstPath "C:\PSTs\archivo.pst" | -StoreId "00000000C..."] \
+  -Json [-PreserveSession]
+```
+
+Emite eventos `scanMeta`, `scanProgress` y una lista plana de carpetas con conteos por año, idénticos a los que consume la UI de Bun/OpenTUI.
+
+- Admite `-FilterOnlyYear` para limitar la ventana de carpetas que se incluyen en el listado (igual que en el importador) y `-IncludeSize` para agregar `sizeBytes`/`sizeHuman` a cada carpeta usando la columna `Size` de la tabla MAPI cuando está disponible.
+- El flag `-Summary` emite un único `type: "summary"` JSON con metadatos, totales, desglose por año y top folders; `-ExportResult` escribe automáticamente ese payload (o la lista de carpetas si no pediste summary) a `scan-result-<timestamp>.json` (por defecto) o `.txt` si pasas `-ExportResult text`. La versión `text` usa saltos de línea para mostrar el mismo resumen de forma legible.
 
 ### Notas adicionales
 - Para obtener `TargetStoreId`, ejecuta `scripts-powershell/outlook-list-stores.ps1` (opcional `-Json`).

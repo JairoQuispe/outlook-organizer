@@ -6,7 +6,7 @@
 ## Uso general
 
 ```powershell
-pwsh -File scripts-powershell/outlook-scan-pst.ps1 [-PstPath <ruta>] [-StoreId <id>] [flags]
+pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 [-PstPath <ruta>] [-StoreId <id>] [flags]
 ```
 
 - Provee `-PstPath` para montar un archivo PST o `-StoreId` para apuntar a un store ya montado.
@@ -23,6 +23,8 @@ pwsh -File scripts-powershell/outlook-scan-pst.ps1 [-PstPath <ruta>] [-StoreId <
 | `-IncludeSize` | `switch` | Calcula `sizeBytes`/`sizeHuman` usando la columna `Size` en la tabla MAPI (cuando está disponible) y lo añade por carpeta.
 | `-Summary` | `switch` | Genera al final un JSON único `type: "summary"` con inputs, fuentes, totales, year breakdown y tops (no repite el dump plano).
 | `-ExportResult [json|text]` | `string` | (Opcional) Escribe el payload final en `scan-result-<timestamp>.json` (default) o `.txt` si pones `text`. El modo texto formatea el resumen con saltos de línea.
+| `-ExportFolders` | `switch` | Exporta solo la lista de carpetas filtradas a un archivo JSON. El nombre incluye los flags usados (año, store, tamaño, fecha/hora). Ideal para ser consumido por otro script PowerShell.
+| `-ExportFoldersPath` | `string` | (Opcional) Ruta personalizada para el archivo generado por `-ExportFolders`. Si se omite, se guarda en el directorio actual.
 | `-Json` | `switch` | Salida compacta en JSON para logs y automatización.
 | `-Headless` | `switch` | Igual que `-Json` pero más explícito para scripts UILess.
 | `-PreserveSession` | `switch` | No cierra ni desmonta Outlook al terminar, ideal cuando ya tienes una instancia abierta.
@@ -32,7 +34,7 @@ pwsh -File scripts-powershell/outlook-scan-pst.ps1 [-PstPath <ruta>] [-StoreId <
 1. Escanear un PST en modo normal (JSON + carpetas):
 
 ```powershell
-pwsh -File scripts-powershell/outlook-scan-pst.ps1 -PstPath "C:\PSTs\archivo.pst" -Json
+pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 -PstPath "C:\PSTs\archivo.pst" -Json
 ```
 
 Salida parcial:
@@ -45,7 +47,7 @@ Salida parcial:
 2. Incluir tamaños y filtrar por año: 
 
 ```powershell
-pwsh -File scripts-powershell/outlook-scan-pst.ps1 -StoreId "00000000C..." -FilterOnlyYear 2023 -IncludeSize -Json
+pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 -StoreId "00000000C..." -FilterOnlyYear 2023 -IncludeSize -Json
 ```
 
 Cada carpeta emitida ahora contiene `sizeBytes` y `sizeHuman` que reflejan los ítems considerados.
@@ -53,7 +55,7 @@ Cada carpeta emitida ahora contiene `sizeBytes` y `sizeHuman` que reflejan los �
 3. Obtener resumen y exportar a disco:
 
 ```powershell
-pwsh -File scripts-powershell/outlook-scan-pst.ps1 -PstPath "C:\PSTs\archivo.pst" -Summary -ExportResult text
+pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 -PstPath "C:\PSTs\archivo.pst" -Summary -ExportResult text
 ```
 
 - Se seguirá imprimiendo el mismo `scanMeta` + `scanProgress` hasta el final.
@@ -62,7 +64,7 @@ pwsh -File scripts-powershell/outlook-scan-pst.ps1 -PstPath "C:\PSTs\archivo.pst
 4. Exportar el resumen directo en JSON (ideal para otra app):
 
 ```powershell
-pwsh -File scripts-powershell/outlook-scan-pst.ps1 -StoreId "00000000C..." -Summary -ExportResult json
+pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 -StoreId "00000000C..." -Summary -ExportResult json
 ```
 
 El archivo `scan-result-<timestamp>.json` contiene:
@@ -80,9 +82,39 @@ El archivo `scan-result-<timestamp>.json` contiene:
 }
 ```
 
+5. Exportar solo la lista de carpetas filtradas:
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 -PstPath "C:\PSTs\archivo.pst" -FilterOnlyYear 2023 -IncludeSize -ExportFolders
+```
+
+Genera un archivo como `scan-year-2023-pst-archivo-with-size-20250512-183000.json` con:
+```json
+{
+  "type": "folderExport",
+  "generatedAt": "2025-05-12T18:30:00.000Z",
+  "pstPath": "C:\\PSTs\\archivo.pst",
+  "storeId": null,
+  "filterOnlyYear": 2023,
+  "includeSize": true,
+  "folderCount": 42,
+  "folders": [
+    { "type": "folder", "path": "Inbox", "itemCount": 150, "sizeBytes": 5242880, "sizeHuman": "5.00 MB", ... },
+    ...
+  ]
+}
+```
+
+6. Exportar carpetas a una ruta personalizada:
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 -StoreId "00000000C..." -ExportFolders -ExportFoldersPath "D:\exports\carpetas.json"
+```
+
 ## Notas adicionales
 
 - Ejecutar sin `-PstPath`/`-StoreId` aborta con error inmediato. 
 - `-Summary` recalcula totales y desgloses, pero no elimina los eventos individuales para retrocompatibilidad.
 - `-ExportResult` respeta el último payload emitido (summary o listado) y agrega logging del archivo generado.
+- `-ExportFolders` genera un JSON independiente con metadata del filtro usado, ideal para encadenar con otro script PS que lo lea con `Get-Content | ConvertFrom-Json`.
 - Para recolectar `StoreId`, usa `scripts-powershell/outlook-list-stores.ps1 -Json`.

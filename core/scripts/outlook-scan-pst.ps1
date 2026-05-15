@@ -29,6 +29,12 @@ param (
     [string]$ExportResult = "json",
 
     [Parameter()]
+    [switch]$ExportFolders,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExportFoldersPath,
+
+    [Parameter()]
     [switch]$Json,
 
     [Parameter()]
@@ -38,68 +44,14 @@ param (
     [switch]$PreserveSession
 )
 
+# --- Initialization -----------------------------------------------------------
+
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
 $ErrorActionPreference = "Stop"
 
 $script:IsHeadlessOutput = ($Json -or $Headless -or $Summary)
 if ($script:IsHeadlessOutput) {
     try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
-}
-
-function Format-SummaryText {
-    param($Summary)
-    $lines = @()
-    $lines += "Scan summary generatedAt: $($Summary.generatedAt)"
-    $inputs = $Summary.inputs
-    $lines += "Inputs: pstPath=$($inputs.pstPath); storeId=$($inputs.storeId); filterOnlyYear=$($inputs.filterOnlyYear); includeSize=$($inputs.includeSize); preserveSession=$($inputs.preserveSession); summary=$($inputs.summary); json=$($inputs.json); headless=$($inputs.headless)"
-    $source = $Summary.source
-    $lines += "Source: resolvedPstPath=$($source.resolvedPstPath); pstSizeBytes=$($source.pstSizeBytes); storeId=$($source.storeId); storeDisplayName=$($source.storeDisplayName); alreadyMounted=$($source.alreadyMounted)"
-    $scan = $Summary.scan
-    $lines += "Scan: estimatedFolders=$($scan.estimatedFolders); scannedFolders=$($scan.scannedFolders); elapsedMs=$($scan.elapsedMs); accumulatedItems=$($scan.accumulatedItems); completed=$($scan.completed)"
-    $totals = $Summary.totals
-    $lines += "Totals: items=$($totals.items); datedItems=$($totals.datedItems); undatedItems=$($totals.undatedItems); sizeBytes=$($totals.sizeBytes); sizeHuman=$($totals.sizeHuman)"
-    if ($Summary.yearBreakdown) {
-        $lines += "Year breakdown:"
-        foreach ($row in $Summary.yearBreakdown) {
-            $lines += "  $($row.year): $($row.count)"
-        }
-    }
-    if ($Summary.topFoldersByItems) {
-        $lines += "Top folders by items:"
-        foreach ($f in $Summary.topFoldersByItems) {
-            $lines += "  $($f.path) -> items $($f.itemCount); sizeBytes=$($f.sizeBytes); sizeHuman=$($f.sizeHuman)"
-        }
-    }
-    if ($Summary.topFoldersBySize) {
-        $lines += "Top folders by size:"
-        foreach ($f in $Summary.topFoldersBySize) {
-            $lines += "  $($f.path) -> sizeBytes $($f.sizeBytes); sizeHuman=$($f.sizeHuman); itemCount=$($f.itemCount)"
-        }
-    }
-    return ($lines -join "`n")
-}
-
-function Write-ExportResult {
-    param($Payload)
-    $timestamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-    $ext = if ($script:ExportResultFormat -eq 'text') { 'txt' } else { 'json' }
-    $filename = "scan-result-$timestamp.$ext"
-    $target = Join-Path (Get-Location) $filename
-    try {
-        if ($script:ExportResultFormat -eq 'text') {
-            if ($Payload.type -eq 'summary') {
-                $formatted = Format-SummaryText -Summary $Payload
-                $formatted | Out-File -FilePath $target -Encoding UTF8 -Force
-            } else {
-                $Payload | ConvertTo-Json -Compress -Depth 6 | Out-File -FilePath $target -Encoding UTF8 -Force
-            }
-        } else {
-            $Payload | ConvertTo-Json -Compress -Depth 12 | Out-File -FilePath $target -Encoding UTF8 -Force
-        }
-        Emit-Log "info" "Resultado exportado a $target"
-    } catch {
-        Emit-Log "warn" "No se pudo exportar el resultado: $($_.Exception.Message)"
-    }
 }
 
 $script:OutlookApplication = $null
@@ -116,11 +68,16 @@ $script:IncludeSizeRequested = [bool]$IncludeSize
 $script:SummaryRequested = [bool]$Summary
 $script:ExportResultRequested = $PSBoundParameters.ContainsKey('ExportResult')
 $script:ExportResultFormat = $ExportResult
+$script:ExportFoldersRequested = [bool]$ExportFolders
+$script:ExportFoldersPathValue = $ExportFoldersPath
+
 if (-not $script:PreserveSessionRequested) {
     try {
         $script:ExistingOutlookPids = Get-Process -Name OUTLOOK -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id
     } catch {}
 }
+
+# --- Helper functions ---------------------------------------------------------
 
 function Get-LogTimestamp { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }
 
@@ -183,6 +140,146 @@ function Emit-ScanProgress {
     if ($Json -or $script:IsHeadlessOutput) { [Console]::WriteLine(($payload | ConvertTo-Json -Compress -Depth 6)) }
     else { Write-Host ("[scan] {0}% {1}/{2} folder={3} items={4}" -f $percent, $scannedFolders, $totalFolders, $FolderPath, $CurrentItemCount) }
 }
+
+function Format-SummaryText {
+    param($Summary)
+    $lines = @()
+    $lines += "========================================"
+    $lines += "  SCAN SUMMARY"
+    $lines += "========================================"
+    $lines += "Generated at: $($Summary.generatedAt)"
+    $lines += ""
+    $lines += "--- Inputs ---"
+    $inputs = $Summary.inputs
+    $lines += "  PST path:         $($inputs.pstPath)"
+    $lines += "  Store ID:         $($inputs.storeId)"
+    $lines += "  Filter year:      $(if ($inputs.filterOnlyYear) { $inputs.filterOnlyYear } else { '(all)' })"
+    $lines += "  Include size:     $($inputs.includeSize)"
+    $lines += "  Preserve session: $($inputs.preserveSession)"
+    $lines += ""
+    $lines += "--- Source ---"
+    $source = $Summary.source
+    $lines += "  Resolved path:    $($source.resolvedPstPath)"
+    $lines += "  PST size:         $($source.pstSizeHuman) ($($source.pstSizeBytes) bytes)"
+    $lines += "  Store ID:         $($source.storeId)"
+    $lines += "  Display name:     $($source.storeDisplayName)"
+    $lines += "  Already mounted:  $($source.alreadyMounted)"
+    $lines += ""
+    $lines += "--- Scan ---"
+    $scan = $Summary.scan
+    $lines += "  Estimated folders: $($scan.estimatedFolders)"
+    $lines += "  Scanned folders:   $($scan.scannedFolders)"
+    $lines += "  Matched folders:   $($scan.matchedFolders)"
+    $lines += "  Elapsed:           $($scan.elapsedMs) ms"
+    $lines += "  Accumulated items: $($scan.accumulatedItems)"
+    $lines += "  Completed:         $($scan.completed)"
+    $lines += ""
+    $lines += "--- Totals ---"
+    $totals = $Summary.totals
+    $lines += "  Items:       $($totals.items)"
+    $lines += "  Dated:       $($totals.datedItems)"
+    $lines += "  Undated:     $($totals.undatedItems)"
+    if ($totals.sizeBytes) {
+        $lines += "  Size:        $($totals.sizeHuman) ($($totals.sizeBytes) bytes)"
+    }
+    if ($Summary.yearBreakdown -and $Summary.yearBreakdown.Count -gt 0) {
+        $lines += ""
+        $lines += "--- Year Breakdown ---"
+        foreach ($row in $Summary.yearBreakdown) {
+            $lines += "  $($row.year):  $($row.count) items"
+        }
+    }
+    if ($Summary.topFoldersByItems -and $Summary.topFoldersByItems.Count -gt 0) {
+        $lines += ""
+        $lines += "--- Top Folders by Items ---"
+        foreach ($f in $Summary.topFoldersByItems) {
+            $sizePart = if ($f.sizeHuman) { " | $($f.sizeHuman)" } else { "" }
+            $lines += "  $($f.path)  ($($f.itemCount) items$sizePart)"
+        }
+    }
+    if ($Summary.topFoldersBySize -and $Summary.topFoldersBySize.Count -gt 0) {
+        $lines += ""
+        $lines += "--- Top Folders by Size ---"
+        foreach ($f in $Summary.topFoldersBySize) {
+            $lines += "  $($f.path)  ($($f.sizeHuman) | $($f.itemCount) items)"
+        }
+    }
+    $lines += ""
+    $lines += "========================================"
+    return ($lines -join "`n")
+}
+
+function Write-ExportResult {
+    param($Payload)
+    $timestamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $ext = if ($script:ExportResultFormat -eq 'text') { 'txt' } else { 'json' }
+    $filename = "scan-result-$timestamp.$ext"
+    $target = Join-Path (Get-Location) $filename
+    try {
+        if ($script:ExportResultFormat -eq 'text') {
+            if ($Payload.type -eq 'summary') {
+                $formatted = Format-SummaryText -Summary $Payload
+                $formatted | Out-File -FilePath $target -Encoding UTF8 -Force
+            } else {
+                $Payload | ConvertTo-Json -Depth 12 | Out-File -FilePath $target -Encoding UTF8 -Force
+            }
+        } else {
+            $Payload | ConvertTo-Json -Compress -Depth 12 | Out-File -FilePath $target -Encoding UTF8 -Force
+        }
+        Emit-Log "info" "Resultado exportado a $target"
+    } catch {
+        Emit-Log "warn" "No se pudo exportar el resultado: $($_.Exception.Message)"
+    }
+}
+
+function Get-FolderExportFileName {
+    param([string]$YearFilter, [string]$SourceLabel, [bool]$WithSize)
+    $yearPart = if ($YearFilter) { "year-$YearFilter" } else { "all-years" }
+    $sizePart = if ($WithSize) { "with-size" } else { "no-size" }
+    $safeSrc = $SourceLabel -replace '[\\/:*?"<>|]+', '-'
+    if ($safeSrc.Length -gt 40) { $safeSrc = $safeSrc.Substring(0, 40) }
+    $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    return "scan-$yearPart-$safeSrc-$sizePart-$ts.json"
+}
+
+function Export-FolderList {
+    param(
+        [array]$Folders,
+        [string]$PstPathInput,
+        [string]$StoreIdInput,
+        [int]$FilterOnlyYearInput,
+        [bool]$IncludeSizeInput
+    )
+
+    $sourceLabel = if ($StoreIdInput) { "store-$StoreIdInput" } elseif ($PstPathInput) { "pst-$([System.IO.Path]::GetFileNameWithoutExtension($PstPathInput))" } else { "unknown" }
+    $yearLabel = if ($script:YearFilterEnabled) { "$FilterOnlyYearInput" } else { "" }
+
+    $payload = [ordered]@{
+        type           = "folderExport"
+        generatedAt    = (Get-Date).ToString('o')
+        pstPath        = $PstPathInput
+        storeId        = $StoreIdInput
+        filterOnlyYear = if ($script:YearFilterEnabled) { [int]$FilterOnlyYearInput } else { $null }
+        includeSize    = [bool]$IncludeSizeInput
+        folderCount    = @($Folders).Count
+        folders        = @($Folders)
+    }
+
+    $target = if ($script:ExportFoldersPathValue) {
+        $script:ExportFoldersPathValue
+    } else {
+        Join-Path (Get-Location) (Get-FolderExportFileName -YearFilter $yearLabel -SourceLabel $sourceLabel -WithSize $IncludeSizeInput)
+    }
+
+    try {
+        $payload | ConvertTo-Json -Depth 12 | Out-File -FilePath $target -Encoding UTF8 -Force
+        Emit-Log "info" "Lista de carpetas exportada a $target"
+    } catch {
+        Emit-Log "warn" "No se pudo exportar las carpetas: $($_.Exception.Message)"
+    }
+}
+
+# --- COM management -----------------------------------------------------------
 
 function Release-ComObjectSafe {
     param([object]$ComObject)
@@ -758,6 +855,10 @@ if ($script:SummaryRequested) {
 
 if ($script:ExportResultRequested -and $finalPayload) {
     Write-ExportResult -Payload $finalPayload
+}
+
+if ($script:ExportFoldersRequested -and @($flat.Value).Count -gt 0) {
+    Export-FolderList -Folders @($flat.Value) -PstPathInput $PstPath -StoreIdInput $StoreId -FilterOnlyYearInput $FilterOnlyYear -IncludeSizeInput $script:IncludeSizeRequested
 }
 
 if (-not $alreadyMounted -and $PstPath) {
