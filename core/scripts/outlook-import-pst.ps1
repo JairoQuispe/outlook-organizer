@@ -149,6 +149,8 @@ function Cleanup-ComResources {
         } catch {}
     }
     $script:ChildFolderCache = $null
+    if ($script:FailedFolderCreations) { try { $script:FailedFolderCreations.Clear() } catch {} }
+    $script:FailedFolderCreations = $null
     $script:FilterOnlyMonthLookup = $null
     Release-ComObjectSafe $script:TargetRootRef
     Release-ComObjectSafe $script:TargetStoreRef
@@ -458,6 +460,7 @@ $script:TokenBucket = @{
 $script:DupIndexCache = New-Object 'System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]'
 $script:RuntimeDupKeys = New-Object 'System.Collections.Generic.HashSet[string]'
 $script:ChildFolderCache = New-Object 'System.Collections.Generic.Dictionary[string, System.Collections.Generic.Dictionary[string, object]]'
+$script:FailedFolderCreations = New-Object 'System.Collections.Generic.HashSet[string]'
 
 function Wait-ForToken {
     while ($true) {
@@ -702,7 +705,22 @@ function Resolve-TargetFolderByPath {
     if (-not $dest) { return $null }
 
     for ($i = 1; $i -lt $segments.Length; $i++) {
-        $dest = Ensure-ChildFolder -parent $dest -Name $segments[$i]
+        $segName = $segments[$i]
+        # Safety: if segment somehow contains backslash, it means path wasn't split properly
+        if ($segName.Contains("\") -or $segName.Contains("/")) {
+            Emit-Log "error" "Segmento[$i] contiene separador de ruta (BUG): '$segName' (SourcePath='$SourcePath', total segments=$($segments.Length))"
+            return $null
+        }
+        try {
+            $dest = Ensure-ChildFolder -parent $dest -Name $segName
+        } catch {
+            Emit-Log "error" "No se pudo crear/resolver segmento[$i]='$segName' en '$SourcePath': $($_.Exception.Message)"
+            return $null
+        }
+        if (-not $dest) {
+            Emit-Log "error" "Ensure-ChildFolder retornó null para segmento[$i]='$segName' (SourcePath='$SourcePath')"
+            return $null
+        }
     }
 
     return $dest
@@ -771,6 +789,80 @@ function Index-ChildFolders {
     return $index
 }
 
+function Find-ChildFolderByNormalizedName {
+    param(
+        $parent,
+        [string]$TargetNorm,
+        [System.Collections.Generic.Dictionary[string, object]]$Index
+    )
+
+    foreach ($f in (Get-SubFolders-Safe -parentFolder $parent)) {
+        $childName = $null
+        try { $childName = [string]$f.Name } catch { continue }
+        $norm = Normalize-FolderName $childName
+        if ([string]::IsNullOrWhiteSpace($norm)) { continue }
+
+        if ($Index -and -not $Index.ContainsKey($norm)) {
+            $Index[$norm] = $f
+        }
+
+        if ($norm -eq $TargetNorm) {
+            return $f
+        }
+    }
+
+    return $null
+}
+
+function Get-FreshFolderByPath {
+    param([string]$FolderPath)
+    # Navigate from namespace root using the FolderPath (e.g. "\\mailbox\Bandeja de entrada\IMPORTACIONES\AEREO")
+    if ([string]::IsNullOrWhiteSpace($FolderPath)) { return $null }
+
+    # Manual navigation: parse \\store\folder\subfolder...
+    try {
+        $ns = $script:MainNamespace
+        if (-not $ns) { return $null }
+        $trimmed = $FolderPath.TrimStart("\")
+        $parts = $trimmed -split '\\'
+        if ($parts.Count -lt 2) { return $null }
+
+        # First part is the store display name, find the store root
+        $storeName = $parts[0]
+        $storeRoot = $null
+        foreach ($store in $ns.Stores) {
+            try {
+                if ($store.DisplayName -eq $storeName) {
+                    $storeRoot = $store.GetRootFolder()
+                    break
+                }
+            } catch {}
+        }
+        if (-not $storeRoot) { return $null }
+
+        $current = $storeRoot
+        for ($i = 1; $i -lt $parts.Count; $i++) {
+            $seg = $parts[$i]
+            if ([string]::IsNullOrWhiteSpace($seg)) { continue }
+            $segNorm = Normalize-FolderName $seg
+            $found = $null
+            try {
+                foreach ($child in $current.Folders) {
+                    try {
+                        $childNorm = Normalize-FolderName ([string]$child.Name)
+                        if ($childNorm -eq $segNorm) { $found = $child; break }
+                    } catch {}
+                }
+            } catch {}
+            if (-not $found) { return $null }
+            $current = $found
+        }
+        return $current
+    } catch {
+        return $null
+    }
+}
+
 function Ensure-ChildFolder {
     param($parent, [string]$Name)
 
@@ -782,6 +874,22 @@ function Ensure-ChildFolder {
         $targetNorm = Normalize-FolderName $safeName
     }
 
+    # Diagnostic: resolve parent path for logging
+    $parentPath = $null
+    try { $parentPath = $parent.FolderPath } catch {}
+    if (-not $parentPath) { try { $parentPath = $parent.Name } catch { $parentPath = "(desconocido)" } }
+
+    # Check if we already know this creation is impossible (avoid retrying N times)
+    $failKey = $null
+    $parentCacheKey = Get-ParentCacheKey -folder $parent
+    if ($parentCacheKey) {
+        $failKey = "$parentCacheKey|$targetNorm"
+        if ($script:FailedFolderCreations.Contains($failKey)) {
+            Emit-Log "warn" "Carpeta '$safeName' en '$parentPath' ya falló anteriormente; omitiendo."
+            return $null
+        }
+    }
+
     $index = Index-ChildFolders -parent $parent
 
     if ($index.ContainsKey($targetNorm)) {
@@ -789,27 +897,119 @@ function Ensure-ChildFolder {
         return $index[$targetNorm]
     }
 
-    # Double-check: re-enumerate live COM collection as final fallback
+    # Double-check: re-enumerate live COM collection as fallback
     # (handles rare case where cache was built before a sibling add)
-    foreach ($f in (Get-SubFolders-Safe -parentFolder $parent)) {
-        $childName = $null
-        try { $childName = [string]$f.Name } catch { continue }
-        $norm = Normalize-FolderName $childName
-        if ($norm -eq $targetNorm) {
-            $index[$norm] = $f
-            Emit-Log "info" "Reutilizando carpeta existente (re-scan): $safeName"
-            return $f
+    $existing = Find-ChildFolderByNormalizedName -parent $parent -TargetNorm $targetNorm -Index $index
+    if ($existing) {
+        Emit-Log "info" "Reutilizando carpeta existente (re-scan): $safeName"
+        return $existing
+    }
+
+    Emit-Log "info" "Creando carpeta nueva: $safeName (padre: $parentPath)"
+    $created = $null
+    $createError = $null
+
+    try {
+        $created = Invoke-WithRetry -OperationName "crear carpeta '$safeName'" -Operation {
+            return $parent.Folders.Add($safeName)
+        }
+    } catch {
+        $createError = $_
+        $hResultText = $null
+        try { $hResultText = ('0x{0:X8}' -f ([uint32]$createError.Exception.HResult)) } catch {}
+        $suffix = if ($hResultText) { " ($hResultText)" } else { "" }
+        Emit-Log "warn" "Falló crear carpeta '$safeName' en '$parentPath': $($createError.Exception.Message)$suffix"
+
+        # If COM actually created it (race/latency), recover by scanning again.
+        Start-Sleep -Milliseconds 500
+
+        # Invalidate cache for this parent so we re-enumerate fresh
+        if ($parentCacheKey -and $script:ChildFolderCache.ContainsKey($parentCacheKey)) {
+            $script:ChildFolderCache.Remove($parentCacheKey)
+        }
+
+        $existingAfterFailure = Find-ChildFolderByNormalizedName -parent $parent -TargetNorm $targetNorm -Index $index
+        if ($existingAfterFailure) {
+            Emit-Log "info" "Carpeta '$safeName' encontrada tras fallo de creación; continuando."
+            return $existingAfterFailure
+        }
+
+        # Strategy: re-obtain parent COM object fresh from namespace and retry
+        $freshParent = $null
+        if ($parentPath) {
+            $freshParent = Get-FreshFolderByPath -FolderPath $parentPath
+        }
+
+        if ($freshParent) {
+            Emit-Log "info" "Reintentando crear '$safeName' con referencia COM fresca del padre."
+            # Check again if it exists under fresh parent
+            $existingFresh = $null
+            try {
+                foreach ($f in $freshParent.Folders) {
+                    try {
+                        $fn = Normalize-FolderName ([string]$f.Name)
+                        if ($fn -eq $targetNorm) { $existingFresh = $f; break }
+                    } catch {}
+                }
+            } catch {}
+            if ($existingFresh) {
+                Emit-Log "info" "Carpeta '$safeName' encontrada bajo padre fresco; continuando."
+                $index[$targetNorm] = $existingFresh
+                return $existingFresh
+            }
+
+            try {
+                $created = $freshParent.Folders.Add($safeName)
+            } catch {
+                $retryErr = $_
+                $hRetry = $null
+                try { $hRetry = ('0x{0:X8}' -f ([uint32]$retryErr.Exception.HResult)) } catch {}
+                $suffRetry = if ($hRetry) { " ($hRetry)" } else { "" }
+                Emit-Log "error" "Reintento con padre fresco también falló para '$safeName' en '$parentPath': $($retryErr.Exception.Message)$suffRetry"
+
+                # Final check
+                $existingFinal = Find-ChildFolderByNormalizedName -parent $parent -TargetNorm $targetNorm -Index $index
+                if ($existingFinal) {
+                    Emit-Log "info" "Carpeta '$safeName' encontrada tras segundo fallo; continuando."
+                    return $existingFinal
+                }
+
+                # Cache this failure
+                if ($failKey) {
+                    [void]$script:FailedFolderCreations.Add($failKey)
+                    Emit-Log "error" "Marcando carpeta '$safeName' en '$parentPath' como no creable; se omitirán futuros intentos."
+                }
+                throw
+            }
+        } else {
+            # Could not get fresh parent, one last retry with original reference
+            try {
+                $created = Invoke-WithRetry -OperationName "reintento crear carpeta '$safeName'" -Operation {
+                    return $parent.Folders.Add($safeName)
+                }
+            } catch {
+                $existingAfterRetry = Find-ChildFolderByNormalizedName -parent $parent -TargetNorm $targetNorm -Index $index
+                if ($existingAfterRetry) {
+                    Emit-Log "info" "Carpeta '$safeName' encontrada tras reintento fallido; continuando."
+                    return $existingAfterRetry
+                }
+                # Cache this failure
+                if ($failKey) {
+                    [void]$script:FailedFolderCreations.Add($failKey)
+                    Emit-Log "error" "Marcando carpeta '$safeName' en '$parentPath' como no creable; se omitirán futuros intentos."
+                }
+                throw
+            }
         }
     }
 
-    Emit-Log "info" "Creando carpeta nueva: $safeName"
-    $created = $parent.Folders.Add($safeName)
-    $index[$targetNorm] = $created
-
-    # Invalidate parent cache to force re-index on next sibling query
-    $cacheKey = Get-ParentCacheKey -folder $parent
-    if ($cacheKey) {
-        $script:ChildFolderCache[$cacheKey] = $index
+    if ($created) {
+        $index[$targetNorm] = $created
+        # Invalidate parent cache to force re-index on next sibling query
+        $cacheKey = Get-ParentCacheKey -folder $parent
+        if ($cacheKey) {
+            $script:ChildFolderCache[$cacheKey] = $index
+        }
     }
 
     return $created
@@ -1339,7 +1539,12 @@ function Restore-FolderRecursive {
     foreach ($sub in $sourceSubFolders) {
         $subName = $null
         try { $subName = [string]$sub.Name } catch { continue }
-        $destSub = Ensure-ChildFolder -parent $destFolder -Name $subName
+        try {
+            $destSub = Ensure-ChildFolder -parent $destFolder -Name $subName
+        } catch {
+            Emit-Log "error" "No se pudo crear subcarpeta '$subName' en '$folderPath': $($_.Exception.Message)"
+            continue
+        }
         Restore-FolderRecursive -sourceFolder $sub -destFolder $destSub -pathPrefix $folderPath -stats $stats
     }
 }
