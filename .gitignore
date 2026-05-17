@@ -1,0 +1,3 @@
+apps/cli/zig-out/
+apps/cli/.zig-cache/
+apps/cli/src/*.ps1

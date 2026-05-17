@@ -7,8 +7,8 @@ param (
     [ValidateSet('ExchangeOnline','OST','PST')]
     [string]$StoreType,
     [Parameter(Mandatory=$false)]
-    [ValidateSet('Json','Text')]
-    [string]$ExportResult = 'Json'
+    [ValidateSet('None','Json','Text')]
+    [string]$ExportResult = 'None'
 )
 
 function Format-StoreBytes {
