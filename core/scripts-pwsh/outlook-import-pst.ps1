@@ -1,4 +1,4 @@
-# Importar correos desde PST a buzón de Outlook/Exchange usando COM
+﻿# Importar correos desde PST a buzón de Outlook/Exchange usando COM
 param (
     [Parameter(Mandatory=$false)]
     [string]$PstPath,
@@ -522,6 +522,8 @@ function Is-ThrottlingError {
     if ($msg -match "Server Busy" -or $msg -match "throttl" -or $msg -match "budget" -or $msg -match "too many requests" -or $msg -match "429") { return $true }
     # Spanish MAPI network/connection errors (locale-dependent messages from Outlook COM)
     if ($msg -match "problemas en la red" -or $msg -match "conexi.n con Microsoft Exchange" -or $msg -match "no se puede completar") { return $true }
+    # Exchange server-side open item/session limits (ES locale)
+    if ($msg -match "ha limitado el n.mero de elementos que puede abrir al mismo tiempo" -or $msg -match "intente cerrar mensajes abiertos") { return $true }
     # Generic network/disconnection patterns
     if ($msg -match "network" -or $msg -match "disconnected" -or $msg -match "connection.*lost" -or $msg -match "RPC_E_DISCONNECTED") { return $true }
     # Check numeric HResult on the exception object
@@ -1271,6 +1273,8 @@ function Build-DuplicateIndexFromFolder {
     $indexInactivityTimeout = [int]$script:DuplicateIndexInactivityTimeoutSec
     $inactivityTimeoutEnabled = ($indexInactivityTimeout -gt 0)
     $lastProgressAt = [DateTime]::UtcNow
+    $table = $null
+    $row = $null
 
     if ($inactivityTimeoutEnabled) {
         Emit-Log "info" "  Timeout por inactividad: ${indexInactivityTimeout}s"
@@ -1291,56 +1295,71 @@ function Build-DuplicateIndexFromFolder {
         } else {
             Emit-Log "info" "  GetTable iniciando..."
         }
-        $table = $folder.GetTable($tableFilter)
-        Emit-Log "info" "  GetTable listo, configurando columnas..."
-        $table.Columns.RemoveAll()
-        try { $table.Columns.Add("http://schemas.microsoft.com/mapi/proptag/0x1035001F") | Out-Null } catch {}
-        try { $table.Columns.Add("urn:schemas:mailheader:message-id") | Out-Null } catch {}
-        try { $table.Columns.Add("http://schemas.microsoft.com/mapi/proptag/0x300B0102") | Out-Null } catch {}
-        try { $table.Columns.Add("Subject") | Out-Null } catch {}
-        try { $table.Columns.Add("ReceivedTime") | Out-Null } catch {}
-        try { $table.Columns.Add("SentOn") | Out-Null } catch {}
-        try { $table.Columns.Add("CreationTime") | Out-Null } catch {}
-        try { $table.Columns.Add("http://schemas.microsoft.com/mapi/proptag/0x0039001F") | Out-Null } catch {}
+        try {
+            $table = $folder.GetTable($tableFilter)
+            Emit-Log "info" "  GetTable listo, configurando columnas..."
+            $table.Columns.RemoveAll()
+            try { $table.Columns.Add("http://schemas.microsoft.com/mapi/proptag/0x1035001F") | Out-Null } catch {}
+            try { $table.Columns.Add("urn:schemas:mailheader:message-id") | Out-Null } catch {}
+            try { $table.Columns.Add("http://schemas.microsoft.com/mapi/proptag/0x300B0102") | Out-Null } catch {}
+            try { $table.Columns.Add("Subject") | Out-Null } catch {}
+            try { $table.Columns.Add("ReceivedTime") | Out-Null } catch {}
+            try { $table.Columns.Add("SentOn") | Out-Null } catch {}
+            try { $table.Columns.Add("CreationTime") | Out-Null } catch {}
+            try { $table.Columns.Add("http://schemas.microsoft.com/mapi/proptag/0x0039001F") | Out-Null } catch {}
 
-        Emit-Log "info" "  Leyendo filas..."
-        $rowCount = 0
-        while (-not $table.EndOfTable) {
-            if ($inactivityTimeoutEnabled) {
-                $idleSec = ([DateTime]::UtcNow - $lastProgressAt).TotalSeconds
-                if ($idleSec -ge $indexInactivityTimeout) {
-                    Emit-Log "warn" "  Timeout por inactividad en indexacion (${indexInactivityTimeout}s), usando indice parcial ($($list.Count) claves)"
-                    return
+            Emit-Log "info" "  Leyendo filas..."
+            $rowCount = 0
+            while (-not $table.EndOfTable) {
+                if ($inactivityTimeoutEnabled) {
+                    $idleSec = ([DateTime]::UtcNow - $lastProgressAt).TotalSeconds
+                    if ($idleSec -ge $indexInactivityTimeout) {
+                        Emit-Log "warn" "  Timeout por inactividad en indexacion (${indexInactivityTimeout}s), usando indice parcial ($($list.Count) claves)"
+                        return
+                    }
                 }
+
+                Release-ComObjectSafe $row
+                $row = $table.GetNextRow()
+                $rowCount++
+                $lastProgressAt = [DateTime]::UtcNow
+
+                if ($rowCount % 500 -eq 0) {
+                    Emit-Log "info" "  indexado $($list.Count) claves ($($sw.Elapsed.TotalSeconds.ToString('F0'))s)..."
+                }
+
+                try {
+                    $k = Get-DuplicateKeyFromRow -row $row
+                    if ($k) { $list.Add([string]$k) }
+                } catch {}
             }
-
-            $row = $table.GetNextRow()
-            $rowCount++
-            $lastProgressAt = [DateTime]::UtcNow
-
-            if ($rowCount % 500 -eq 0) {
-                Emit-Log "info" "  indexado $($list.Count) claves ($($sw.Elapsed.TotalSeconds.ToString('F0'))s)..."
-            }
-
-            try {
-                $k = Get-DuplicateKeyFromRow -row $row
-                if ($k) { $list.Add([string]$k) }
-            } catch {}
+            Emit-Log "info" "  Indexacion completa: $($list.Count) claves en $($sw.Elapsed.TotalSeconds.ToString('F1'))s"
+            return
+        } finally {
+            Release-ComObjectSafe $row
+            Release-ComObjectSafe $table
+            $row = $null
+            $table = $null
         }
-        Emit-Log "info" "  Indexacion completa: $($list.Count) claves en $($sw.Elapsed.TotalSeconds.ToString('F1'))s"
-        return
     } catch {
         Emit-Log "warn" "GetTable fallo ($($sw.Elapsed.TotalSeconds.ToString('F0'))s): $($_.Exception.Message)"
     }
 
     # Strategy 2: Fallback item-by-item (slow but reliable)
+    $fallbackItems = $null
     try {
         $itemCount = 0
-        try { $itemCount = [int]$folder.Items.Count } catch {}
+        try {
+            $fallbackItems = $folder.Items
+            $itemCount = [int]$fallbackItems.Count
+        } catch {}
         Emit-Log "warn" "Fallback: iterando $itemCount items individualmente..."
         $idx = 0
         $lastProgressAt = [DateTime]::UtcNow
-        foreach ($it in $folder.Items) {
+        for ($itemIdx = $itemCount; $itemIdx -ge 1; $itemIdx--) {
+            $it = $null
+            try { $it = $fallbackItems.Item($itemIdx) } catch { continue }
+            if (-not $it) { continue }
             if ($inactivityTimeoutEnabled) {
                 $idleSec = ([DateTime]::UtcNow - $lastProgressAt).TotalSeconds
                 if ($idleSec -ge $indexInactivityTimeout) {
@@ -1348,16 +1367,24 @@ function Build-DuplicateIndexFromFolder {
                     return
                 }
             }
-            $k = $null
-            try { $k = Get-DuplicateKeyFromItem -item $it } catch {}
-            if ($k) { $list.Add([string]$k) }
-            $idx++
-            $lastProgressAt = [DateTime]::UtcNow
-            if ($idx % 100 -eq 0) {
-                Emit-Log "info" "  fallback: $idx/$itemCount ($($sw.Elapsed.TotalSeconds.ToString('F0'))s)..."
+            try {
+                $k = $null
+                try { $k = Get-DuplicateKeyFromItem -item $it } catch {}
+                if ($k) { $list.Add([string]$k) }
+                $idx++
+                $lastProgressAt = [DateTime]::UtcNow
+                if ($idx % 100 -eq 0) {
+                    Emit-Log "info" "  fallback: $idx/$itemCount ($($sw.Elapsed.TotalSeconds.ToString('F0'))s)..."
+                }
+            } finally {
+                Release-ComObjectSafe $it
+                $it = $null
             }
         }
-    } catch {}
+    } catch {} finally {
+        Release-ComObjectSafe $fallbackItems
+        $fallbackItems = $null
+    }
 }
 
 function Build-DuplicateIndexRecursive {
@@ -1424,175 +1451,195 @@ function Restore-FolderRecursive {
     }
 
     $items = $null
-    try { $items = $sourceFolder.Items } catch {
-        Emit-Log "error" "No se pudo acceder a Items en $folderPath : $($_.Exception.Message)"
-        return
-    }
-    $itemCount = 0
-    try { $itemCount = [int]$items.Count } catch {}
+    try {
+        try { $items = $sourceFolder.Items } catch {
+            Emit-Log "error" "No se pudo acceder a Items en $folderPath : $($_.Exception.Message)"
+            return
+        }
+        $itemCount = 0
+        try { $itemCount = [int]$items.Count } catch {}
 
-    Emit-Log "info" "$activity $itemCount ítems de: $folderPath"
+        Emit-Log "info" "$activity $itemCount items de: $folderPath"
 
-    $hasMonthFilter = ($script:FilterOnlyMonthLookup -and $script:FilterOnlyMonthLookup.Count -gt 0)
+        $hasMonthFilter = ($script:FilterOnlyMonthLookup -and $script:FilterOnlyMonthLookup.Count -gt 0)
+        $gcCounter = 0
 
-    if ($processCurrent -and $itemCount -gt 0) {
-        for ($i = $itemCount; $i -ge 1; $i--) {
-            $item = $null
-            try { $item = $items.Item($i) } catch { continue }
-            if (-not $item) { continue }
+        if ($processCurrent -and $itemCount -gt 0) {
+            for ($i = $itemCount; $i -ge 1; $i--) {
+                $item = $null
+                try {
+                    try { $item = $items.Item($i) } catch { continue }
+                    if (-not $item) { continue }
 
-            try {
-            if ($script:FolderPlanContext.enabled -and $script:FolderPlanContext.currentEntry) {
-                $entry = $script:FolderPlanContext.currentEntry
-                $entry.seen++
-                $folderExpected = [int][Math]::Max(0, $entry.itemCount)
-                $folderSeen = [int][Math]::Max(0, $entry.seen)
-                $folderDenominator = if ($folderExpected -gt 0) { [int][Math]::Max($folderExpected, $folderSeen) } else { [int][Math]::Max($itemCount, $folderSeen) }
-                $folderPercent = 0
-                if ($folderDenominator -gt 0) {
-                    $folderPercent = [int][Math]::Min(100, [Math]::Round(($folderSeen / [double]$folderDenominator) * 100))
-                }
-                Emit-Log "info" ("carpeta {0} - item {1} de {2} - cargando {3}%" -f $entry.path, $folderSeen, $folderDenominator, $folderPercent)
-            }
-
-            $itemDate = $null
-
-            if ($script:FilterOnlyYear) {
-                $itemDate = $null
-                try { $itemDate = $item.ReceivedTime } catch {}
-                if (-not $itemDate) {
-                    try { $itemDate = $item.CreationTime } catch {}
-                }
-                if (-not $itemDate -or $itemDate.Year -ne $script:FilterOnlyYear) {
-                    $stats.Value.skipped++
-                    continue
-                }
-            }
-
-            if ($hasMonthFilter) {
-                if (-not $itemDate) {
-                    try { $itemDate = $item.ReceivedTime } catch {}
-                    if (-not $itemDate) {
-                        try { $itemDate = $item.CreationTime } catch {}
+                    if ($script:FolderPlanContext.enabled -and $script:FolderPlanContext.currentEntry) {
+                        $entry = $script:FolderPlanContext.currentEntry
+                        $entry.seen++
+                        $folderExpected = [int][Math]::Max(0, $entry.itemCount)
+                        $folderSeen = [int][Math]::Max(0, $entry.seen)
+                        $folderDenominator = if ($folderExpected -gt 0) { [int][Math]::Max($folderExpected, $folderSeen) } else { [int][Math]::Max($itemCount, $folderSeen) }
+                        $folderPercent = 0
+                        if ($folderDenominator -gt 0) {
+                            $folderPercent = [int][Math]::Min(100, [Math]::Round(($folderSeen / [double]$folderDenominator) * 100))
+                        }
+                        Emit-Log "info" ("carpeta {0} - item {1} de {2} - cargando {3}%" -f $entry.path, $folderSeen, $folderDenominator, $folderPercent)
                     }
-                }
-                $monthValue = $null
-                if ($itemDate) {
-                    try { $monthValue = [int]$itemDate.Month } catch { $monthValue = $null }
-                }
-                $monthMatches = $false
-                if ($monthValue -ne $null) {
-                    try { $monthMatches = $script:FilterOnlyMonthLookup.Contains($monthValue) } catch { $monthMatches = $false }
-                }
-                if (-not $itemDate -or -not $monthMatches) {
-                    $stats.Value.skipped++
-                    continue
-                }
-            }
 
-            $dupKey = $null
-            if ($existingKeys) {
-                $dupKey = Get-DuplicateKeyFromItem -item $item
-                if ($dupKey) {
-                    $isDup = $false
-                    $dupSource = $null
-                    if ($existingKeys.Contains([string]$dupKey)) {
-                        $isDup = $true
-                        $dupSource = "existing"
-                    } elseif ($script:RuntimeDupKeys.Contains([string]$dupKey)) {
-                        $isDup = $true
-                        $dupSource = "batch"
+                    $itemDate = $null
+
+                    if ($script:FilterOnlyYear) {
+                        $itemDate = $null
+                        try { $itemDate = $item.ReceivedTime } catch {}
+                        if (-not $itemDate) {
+                            try { $itemDate = $item.CreationTime } catch {}
+                        }
+                        if (-not $itemDate -or $itemDate.Year -ne $script:FilterOnlyYear) {
+                            $stats.Value.skipped++
+                            continue
+                        }
                     }
-                    if ($isDup) {
-                        $stats.Value.skipped++
-                        $dupPayload = @{
-                            type = "dupSkipped"
+
+                    if ($hasMonthFilter) {
+                        if (-not $itemDate) {
+                            try { $itemDate = $item.ReceivedTime } catch {}
+                            if (-not $itemDate) {
+                                try { $itemDate = $item.CreationTime } catch {}
+                            }
+                        }
+                        $monthValue = $null
+                        if ($itemDate) {
+                            try { $monthValue = [int]$itemDate.Month } catch { $monthValue = $null }
+                        }
+                        $monthMatches = $false
+                        if ($monthValue -ne $null) {
+                            try { $monthMatches = $script:FilterOnlyMonthLookup.Contains($monthValue) } catch { $monthMatches = $false }
+                        }
+                        if (-not $itemDate -or -not $monthMatches) {
+                            $stats.Value.skipped++
+                            continue
+                        }
+                    }
+
+                    $dupKey = $null
+                    if ($existingKeys) {
+                        $dupKey = Get-DuplicateKeyFromItem -item $item
+                        if ($dupKey) {
+                            $isDup = $false
+                            $dupSource = $null
+                            if ($existingKeys.Contains([string]$dupKey)) {
+                                $isDup = $true
+                                $dupSource = "existing"
+                            } elseif ($script:RuntimeDupKeys.Contains([string]$dupKey)) {
+                                $isDup = $true
+                                $dupSource = "batch"
+                            }
+                            if ($isDup) {
+                                $stats.Value.skipped++
+                                $dupPayload = @{
+                                    type = "dupSkipped"
+                                    folder = $folderPath
+                                    subject = (Get-SafeSubject $item)
+                                    key = [string]$dupKey
+                                    source = $dupSource
+                                }
+                                if ($script:IsHeadlessOutput) { [Console]::WriteLine(($dupPayload | ConvertTo-Json -Compress -Depth 6)) }
+                                else { Emit-Log "info" "Duplicado saltado [$dupSource]: $(Get-SafeSubject $item)" }
+                                continue
+                            }
+                        }
+                    }
+
+                    $itemSize = 0
+                    try { $itemSize = [long]$item.Size } catch {}
+                    if ($script:MaxItemSizeBytes -gt 0 -and $itemSize -gt $script:MaxItemSizeBytes) {
+                        $stats.Value.failed++
+                        Add-FailureRecord -stats $stats -Record @{
                             folder = $folderPath
                             subject = (Get-SafeSubject $item)
-                            key = [string]$dupKey
-                            source = $dupSource
+                            reason = "too_large"
+                            sizeBytes = $itemSize
                         }
-                        if ($script:IsHeadlessOutput) { [Console]::WriteLine(($dupPayload | ConvertTo-Json -Compress -Depth 6)) }
-                        else { Emit-Log "info" "Duplicado saltado [$dupSource]: $(Get-SafeSubject $item)" }
+                        Emit-Log "warn" "Item > $(Format-Bytes -bytes $script:MaxItemSizeBytes) ignorado: $(Get-SafeSubject $item)"
                         continue
                     }
-                }
-            }
 
-            $itemSize = 0
-            try { $itemSize = [long]$item.Size } catch {}
-            if ($script:MaxItemSizeBytes -gt 0 -and $itemSize -gt $script:MaxItemSizeBytes) {
-                $stats.Value.failed++
-                Add-FailureRecord -stats $stats -Record @{
-                    folder = $folderPath
-                    subject = (Get-SafeSubject $item)
-                    reason = "too_large"
-                    sizeBytes = $itemSize
-                }
-                Emit-Log "warn" "Ítem > $(Format-Bytes -bytes $script:MaxItemSizeBytes) ignorado: $(Get-SafeSubject $item)"
-                continue
-            }
+                    Wait-ForToken
 
-            Wait-ForToken
-
-            try {
-                Invoke-WithRetry -OperationName "$Action ítem" -Operation {
-                    if ($Action -ieq "Move") {
-                        [void]$item.Move($destFolder)
-                    } else {
-                        $copied = $item.Copy()
-                        if ($copied) {
-                            [void]$copied.Move($destFolder)
-                        } else {
-                            throw "No se pudo copiar el ítem."
+                    try {
+                        Invoke-WithRetry -OperationName "$Action item" -Operation {
+                            if ($Action -ieq "Move") {
+                                [void]$item.Move($destFolder)
+                            } else {
+                                $c = $item.Copy()
+                                try {
+                                    if ($c) {
+                                        [void]$c.Move($destFolder)
+                                    } else {
+                                        throw "No se pudo copiar el item."
+                                    }
+                                } finally {
+                                    Release-ComObjectSafe $c
+                                    $c = $null
+                                }
+                            }
                         }
+                        if ($Action -ieq "Move") { $stats.Value.moved++ } else { $stats.Value.copied++ }
+                        if ($script:AdaptiveThrottling -and $script:TokenBucket.adaptiveMultiplier -lt 1.0) {
+                            $script:TokenBucket.successStreak++
+                            if ($script:TokenBucket.successStreak -ge $script:TokenBucket.recoveryInterval) {
+                                $script:TokenBucket.successStreak = 0
+                                $oldMult = $script:TokenBucket.adaptiveMultiplier
+                                $script:TokenBucket.adaptiveMultiplier = [Math]::Min(1.0, $script:TokenBucket.adaptiveMultiplier * $script:TokenBucket.recoveryFactor)
+                                $newRate = [int]($script:TokenBucket.refillRate * $script:TokenBucket.adaptiveMultiplier * 60.0)
+                                Emit-Log "info" "Adaptive recovery: multiplicador $([Math]::Round($oldMult,3)) -> $([Math]::Round($script:TokenBucket.adaptiveMultiplier,3)) (~${newRate} items/min)"
+                            }
+                        }
+                        if ($dupKey) {
+                            [void]$script:RuntimeDupKeys.Add([string]$dupKey)
+                            # Update folder cache so subsequent calls see this key
+                            if ($existingKeys) {
+                                [void]$existingKeys.Add([string]$dupKey)
+                            }
+                        }
+                    } catch {
+                        $stats.Value.failed++
+                        $reason = if (Is-ThrottlingError $_) { "throttled_max_retries" } else { "error" }
+                        Add-FailureRecord -stats $stats -Record @{
+                            folder = $folderPath
+                            subject = (Get-SafeSubject $item)
+                            reason = $reason
+                            message = "$($_.Exception.Message)"
+                        }
+                        Emit-Log "error" "Fallo item en $folderPath : $($_.Exception.Message)"
                     }
-                }
-                if ($Action -ieq "Move") { $stats.Value.moved++ } else { $stats.Value.copied++ }
-                if ($script:AdaptiveThrottling -and $script:TokenBucket.adaptiveMultiplier -lt 1.0) {
-                    $script:TokenBucket.successStreak++
-                    if ($script:TokenBucket.successStreak -ge $script:TokenBucket.recoveryInterval) {
-                        $script:TokenBucket.successStreak = 0
-                        $oldMult = $script:TokenBucket.adaptiveMultiplier
-                        $script:TokenBucket.adaptiveMultiplier = [Math]::Min(1.0, $script:TokenBucket.adaptiveMultiplier * $script:TokenBucket.recoveryFactor)
-                        $newRate = [int]($script:TokenBucket.refillRate * $script:TokenBucket.adaptiveMultiplier * 60.0)
-                        Emit-Log "info" "Adaptive recovery: multiplicador $([Math]::Round($oldMult,3)) -> $([Math]::Round($script:TokenBucket.adaptiveMultiplier,3)) (~${newRate} items/min)"
-                    }
-                }
-                if ($dupKey) {
-                    [void]$script:RuntimeDupKeys.Add([string]$dupKey)
-                    # Update folder cache so subsequent calls see this key
-                    if ($existingKeys) {
-                        [void]$existingKeys.Add([string]$dupKey)
-                    }
-                }
-            } catch {
-                $stats.Value.failed++
-                $reason = if (Is-ThrottlingError $_) { "throttled_max_retries" } else { "error" }
-                Add-FailureRecord -stats $stats -Record @{
-                    folder = $folderPath
-                    subject = (Get-SafeSubject $item)
-                    reason = $reason
-                    message = "$($_.Exception.Message)"
-                }
-                Emit-Log "error" "Falló ítem en $folderPath : $($_.Exception.Message)"
-            }
 
-            $stats.Value.processed++
-            $pct = 0
-            if ($stats.Value.total -gt 0) {
-                $pct = [int][Math]::Round(($stats.Value.processed / $stats.Value.total) * 100)
-                if ($pct -gt 99 -and $stats.Value.processed -lt $stats.Value.total) { $pct = 99 }
-                if ($pct -eq 0 -and $stats.Value.processed -gt 0) { $pct = 1 }
-            }
-            Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "$folderPath ($($stats.Value.processed)/$($stats.Value.total))" -PercentComplete $pct -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed
+                    $stats.Value.processed++
+                    $pct = 0
+                    if ($stats.Value.total -gt 0) {
+                        $pct = [int][Math]::Round(($stats.Value.processed / $stats.Value.total) * 100)
+                        if ($pct -gt 99 -and $stats.Value.processed -lt $stats.Value.total) { $pct = 99 }
+                        if ($pct -eq 0 -and $stats.Value.processed -gt 0) { $pct = 1 }
+                    }
+                    Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "$folderPath ($($stats.Value.processed)/$($stats.Value.total))" -PercentComplete $pct -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed
 
-            Emit-ThrottleStats
-            } finally {
-                Release-ComObjectSafe $item
-                $item = $null
+                    Emit-ThrottleStats
+                } finally {
+                    Release-ComObjectSafe $item
+                    $item = $null
+                    # Periodic GC to release lingering COM refs and prevent open-item limit
+                    $gcCounter++
+                    if ($gcCounter % 50 -eq 0) {
+                        [GC]::Collect()
+                        [GC]::WaitForPendingFinalizers()
+                    }
+                }
             }
         }
+    } finally {
+        Release-ComObjectSafe $items
+        $items = $null
+        # GC after finishing folder to free all accumulated COM refs
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
     }
 
     # Pre-index destination children BEFORE iterating source subfolders
@@ -1817,12 +1864,12 @@ if ($script:IsHeadlessOutput) {
     Write-Host "  Throttle espera:   ${waitedSec}s"
     if ($stats.Value.failures.Count -gt 0) {
         Write-Host ""
-        Write-Host "--- Fallos detallados (máx $($stats.Value.failures.Count)) ---"
+        Write-Host ("--- Fallos detallados (max {0}) ---" -f $stats.Value.failures.Count)
         foreach ($f in $stats.Value.failures) {
-            Write-Host "  [$($f.reason)] $($f.folder) | $($f.subject)"
+            Write-Host ("  [{0}] {1} | {2}" -f $f.reason, $f.folder, $f.subject)
         }
         if ($stats.Value.failureOverflow -gt 0) {
-            Write-Host "  ... y $($stats.Value.failureOverflow) más no registrados."
+            Write-Host ("  ... y {0} mas no registrados." -f $stats.Value.failureOverflow)
         }
     }
     Write-Host "========================================"
