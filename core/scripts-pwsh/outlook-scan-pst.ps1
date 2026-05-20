@@ -41,7 +41,15 @@ param (
     [switch]$Headless,
 
     [Parameter()]
-    [switch]$PreserveSession
+    [switch]$PreserveSession,
+
+    [Parameter()]
+    [Alias('ExportStadistics')]
+    [switch]$ExportStatistics,
+
+    [Parameter(Mandatory = $false)]
+    [Alias('ExportStadisticsPath')]
+    [string]$ExportStatisticsPath
 )
 
 # --- Initialization -----------------------------------------------------------
@@ -70,6 +78,11 @@ $script:ExportResultRequested = $PSBoundParameters.ContainsKey('ExportResult')
 $script:ExportResultFormat = $ExportResult
 $script:ExportFoldersRequested = [bool]$ExportFolders
 $script:ExportFoldersPathValue = $ExportFoldersPath
+$script:ExportStatisticsRequested = [bool]$ExportStatistics
+$script:ExportStatisticsPathValue = $ExportStatisticsPath
+if ($script:ExportStatisticsRequested) {
+    $script:IncludeSizeRequested = $true
+}
 
 if (-not $script:PreserveSessionRequested) {
     try {
@@ -279,6 +292,115 @@ function Export-FolderList {
     }
 }
 
+function Export-PstStatistics {
+    param(
+        [array]$Folders,
+        [string]$PstPathInput,
+        [string]$StoreIdInput
+    )
+
+    $globalYearCounts = @{}
+    $globalYearSizes = @{}
+    $globalMonthCounts = @{}
+    $globalMonthSizes = @{}
+    
+    $totalItems = 0
+    $totalSizeBytes = 0
+    
+    foreach ($f in $Folders) {
+        $totalItems += [int]$f.itemCount
+        if ($null -ne $f.sizeBytes) {
+            $totalSizeBytes += [long]$f.sizeBytes
+        }
+        
+        foreach ($yRow in @($f.yearBreakdown)) {
+            $y = [int]$yRow.year
+            $c = [int]$yRow.count
+            $s = 0
+            if ($null -ne $yRow.sizeBytes) { $s = [long]$yRow.sizeBytes }
+            
+            if ($globalYearCounts.ContainsKey($y)) {
+                $globalYearCounts[$y] += $c
+                $globalYearSizes[$y] += $s
+            } else {
+                $globalYearCounts[$y] = $c
+                $globalYearSizes[$y] = $s
+            }
+        }
+        
+        foreach ($mRow in @($f.monthBreakdown)) {
+            $m = [string]$mRow.month
+            $c = [int]$mRow.count
+            $s = 0
+            if ($null -ne $mRow.sizeBytes) { $s = [long]$mRow.sizeBytes }
+            
+            if ($globalMonthCounts.ContainsKey($m)) {
+                $globalMonthCounts[$m] += $c
+                $globalMonthSizes[$m] += $s
+            } else {
+                $globalMonthCounts[$m] = $c
+                $globalMonthSizes[$m] = $s
+            }
+        }
+    }
+    
+    $globalYearBreakdown = @()
+    foreach ($y in ($globalYearCounts.Keys | Sort-Object -Descending)) {
+        $globalYearBreakdown += [pscustomobject]@{
+            year = [int]$y
+            count = [int]$globalYearCounts[$y]
+            sizeBytes = [long]$globalYearSizes[$y]
+            sizeHuman = Format-SizeHuman -Bytes ([long]$globalYearSizes[$y])
+        }
+    }
+    
+    $globalMonthBreakdown = @()
+    foreach ($m in ($globalMonthCounts.Keys | Sort-Object -Descending)) {
+        $globalMonthBreakdown += [pscustomobject]@{
+            month = [string]$m
+            count = [int]$globalMonthCounts[$m]
+            sizeBytes = [long]$globalMonthSizes[$m]
+            sizeHuman = Format-SizeHuman -Bytes ([long]$globalMonthSizes[$m])
+        }
+    }
+    
+    $sourceLabel = if ($StoreIdInput) { "store-$StoreIdInput" } elseif ($PstPathInput) { "pst-$([System.IO.Path]::GetFileNameWithoutExtension($PstPathInput))" } else { "unknown" }
+    
+    $payload = [ordered]@{
+        type           = "pstStatistics"
+        generatedAt    = (Get-Date).ToString('o')
+        pstPath        = $PstPathInput
+        storeId        = $StoreIdInput
+        pstSizeBytes   = [long]$script:ScanState.pstSizeBytes
+        pstSizeHuman   = Format-SizeHuman -Bytes ([long]$script:ScanState.pstSizeBytes)
+        foldersCount   = @($Folders).Count
+        globalStats = [ordered]@{
+            totalItems = [long]$totalItems
+            totalSizeBytes = [long]$totalSizeBytes
+            totalSizeHuman = Format-SizeHuman -Bytes $totalSizeBytes
+            yearBreakdown = @($globalYearBreakdown)
+            monthBreakdown = @($globalMonthBreakdown)
+        }
+        folders        = @($Folders)
+    }
+    
+    $target = if ($script:ExportStatisticsPathValue) {
+        $script:ExportStatisticsPathValue
+    } else {
+        $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $safeSrc = $sourceLabel -replace '[\\/:*?"<>|]+', '-'
+        if ($safeSrc.Length -gt 40) { $safeSrc = $safeSrc.Substring(0, 40) }
+        Join-Path (Get-Location) "pst-stats-$safeSrc-$ts.json"
+    }
+    
+    try {
+        $payload | ConvertTo-Json -Depth 12 | Out-File -FilePath $target -Encoding UTF8 -Force
+        Emit-Log "info" "Estadisticas de PST exportadas a $target"
+    } catch {
+        Emit-Log "warn" "No se pudo exportar las estadisticas: $($_.Exception.Message)"
+    }
+}
+
 # --- COM management -----------------------------------------------------------
 
 function Release-ComObjectSafe {
@@ -439,6 +561,11 @@ function Collect-PstFoldersRecursive {
         $folderPath = if ($pathPrefix) { "$pathPrefix\$($folder.Name)" } else { $folder.Name }
         $count = 0
         $yearCounts = @{}
+        $yearSizes = @{}
+        $monthCounts = @{}
+        $monthSizes = @{}
+        $oldestDate = $null
+        $newestDate = $null
         $usedTable = $false
         try {
             $table = $folder.GetTable("")
@@ -484,11 +611,17 @@ function Collect-PstFoldersRecursive {
                     }
                     if ($d) {
                         $y = [int]$d.Year
-                        if ($yearCounts.ContainsKey($y)) {
-                            $yearCounts[$y]++
-                        } else {
-                            $yearCounts[$y] = 1
+                        $m = $d.ToString("yyyy-MM")
+                        if ($yearCounts.ContainsKey($y)) { $yearCounts[$y]++ } else { $yearCounts[$y] = 1 }
+                        if ($script:IncludeSizeRequested) {
+                            if ($yearSizes.ContainsKey($y)) { $yearSizes[$y] += [long]$rowSize } else { $yearSizes[$y] = [long]$rowSize }
                         }
+                        if ($monthCounts.ContainsKey($m)) { $monthCounts[$m]++ } else { $monthCounts[$m] = 1 }
+                        if ($script:IncludeSizeRequested) {
+                            if ($monthSizes.ContainsKey($m)) { $monthSizes[$m] += [long]$rowSize } else { $monthSizes[$m] = [long]$rowSize }
+                        }
+                        if ($null -eq $oldestDate -or $d -lt $oldestDate) { $oldestDate = $d }
+                        if ($null -eq $newestDate -or $d -gt $newestDate) { $newestDate = $d }
                     }
                 }
             }
@@ -537,11 +670,17 @@ function Collect-PstFoldersRecursive {
                     $count++
                     if ($d) {
                         $y = [int]$d.Year
-                        if ($yearCounts.ContainsKey($y)) {
-                            $yearCounts[$y]++
-                        } else {
-                            $yearCounts[$y] = 1
+                        $m = $d.ToString("yyyy-MM")
+                        if ($yearCounts.ContainsKey($y)) { $yearCounts[$y]++ } else { $yearCounts[$y] = 1 }
+                        if ($script:IncludeSizeRequested) {
+                            if ($yearSizes.ContainsKey($y)) { $yearSizes[$y] += [long]$itemSize } else { $yearSizes[$y] = [long]$itemSize }
                         }
+                        if ($monthCounts.ContainsKey($m)) { $monthCounts[$m]++ } else { $monthCounts[$m] = 1 }
+                        if ($script:IncludeSizeRequested) {
+                            if ($monthSizes.ContainsKey($m)) { $monthSizes[$m] += [long]$itemSize } else { $monthSizes[$m] = [long]$itemSize }
+                        }
+                        if ($null -eq $oldestDate -or $d -lt $oldestDate) { $oldestDate = $d }
+                        if ($null -eq $newestDate -or $d -gt $newestDate) { $newestDate = $d }
                     }
                 }
             } catch {}
@@ -549,7 +688,26 @@ function Collect-PstFoldersRecursive {
 
         $yearBreakdown = @()
         foreach ($y in ($yearCounts.Keys | Sort-Object -Descending)) {
-            $yearBreakdown += [pscustomobject]@{ year = [int]$y; count = [int]$yearCounts[$y] }
+            $ySizeBytes = if ($script:IncludeSizeRequested) { [long]$yearSizes[$y] } else { $null }
+            $ySizeHuman = if ($script:IncludeSizeRequested) { Format-SizeHuman -Bytes $ySizeBytes } else { $null }
+            $yearBreakdown += [pscustomobject]@{
+                year = [int]$y
+                count = [int]$yearCounts[$y]
+                sizeBytes = $ySizeBytes
+                sizeHuman = $ySizeHuman
+            }
+        }
+
+        $monthBreakdown = @()
+        foreach ($m in ($monthCounts.Keys | Sort-Object -Descending)) {
+            $mSizeBytes = if ($script:IncludeSizeRequested) { [long]$monthSizes[$m] } else { $null }
+            $mSizeHuman = if ($script:IncludeSizeRequested) { Format-SizeHuman -Bytes $mSizeBytes } else { $null }
+            $monthBreakdown += [pscustomobject]@{
+                month = [string]$m
+                count = [int]$monthCounts[$m]
+                sizeBytes = $mSizeBytes
+                sizeHuman = $mSizeHuman
+            }
         }
 
         $datedCount = 0
@@ -567,7 +725,7 @@ function Collect-PstFoldersRecursive {
             return
         }
 
-        $out.Value += [pscustomobject]@{
+        $folderObj = [ordered]@{
             type = "folder"
             path = $folderPath
             itemCount = $count
@@ -576,6 +734,14 @@ function Collect-PstFoldersRecursive {
             yearBreakdown = @($yearBreakdown)
             undatedCount = $undatedCount
         }
+
+        if ($script:ExportStatisticsRequested) {
+            $folderObj["monthBreakdown"] = @($monthBreakdown)
+            $folderObj["oldestEmail"] = if ($oldestDate) { $oldestDate.ToString("yyyy-MM-ddTHH:mm:ssK") } else { $null }
+            $folderObj["newestEmail"] = if ($newestDate) { $newestDate.ToString("yyyy-MM-ddTHH:mm:ssK") } else { $null }
+        }
+
+        $out.Value += [pscustomobject]$folderObj
 
         if ($script:ScanState) {
             $script:ScanState.scannedFolders = [int]$script:ScanState.scannedFolders + 1
@@ -859,6 +1025,10 @@ if ($script:ExportResultRequested -and $finalPayload) {
 
 if ($script:ExportFoldersRequested -and @($flat.Value).Count -gt 0) {
     Export-FolderList -Folders @($flat.Value) -PstPathInput $PstPath -StoreIdInput $StoreId -FilterOnlyYearInput $FilterOnlyYear -IncludeSizeInput $script:IncludeSizeRequested
+}
+
+if ($script:ExportStatisticsRequested -and @($flat.Value).Count -gt 0) {
+    Export-PstStatistics -Folders @($flat.Value) -PstPathInput $PstPath -StoreIdInput $StoreId
 }
 
 if (-not $alreadyMounted -and $PstPath) {

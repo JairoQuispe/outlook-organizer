@@ -16,6 +16,7 @@ const ImportProgressState = struct {
     skipped: i64,
     failed: i64,
     percent: u32,
+    has_rendered_progress: bool,
 };
 
 const ScannedFolder = struct {
@@ -260,17 +261,34 @@ fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
     const remaining = @max(total_estimated - processed, 0);
     const elapsed_ms = std.time.milliTimestamp() - state.start_ms;
 
-    ui.printProgressBar(state.percent, elapsed_ms, "Importando");
+    if (state.has_rendered_progress) {
+        std.debug.print("\x1b[1F", .{});
+    } else {
+        state.has_rendered_progress = true;
+    }
 
-    std.debug.print("\n  \x1b[90mProcesados:\x1b[0m {d}  \x1b[90mRestantes(est):\x1b[0m {d}", .{ processed, remaining });
+    ui.printProgressBar(state.percent, "Importando");
+
+    const elapsed_sec = @divTrunc(elapsed_ms, 1000);
+    const elapsed_parts = ui.secondsToHms(elapsed_sec);
+
+    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m {d} \x1b[90m| Restantes(est):\x1b[0m {d} \x1b[90m| Transcurrido:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
+        processed,
+        remaining,
+        elapsed_parts.hours,
+        elapsed_parts.minutes,
+        elapsed_parts.seconds,
+    });
 
     if (state.percent > 0 and state.percent < 100) {
         const total_est_ms = @divTrunc(elapsed_ms * 100, @as(i64, @intCast(state.percent)));
         const eta_ms = @max(total_est_ms - elapsed_ms, 0);
         const eta_s = @divTrunc(eta_ms, 1000);
-        const eta_m = @divTrunc(eta_s, 60);
-        const eta_r = @rem(eta_s, 60);
-        std.debug.print("  \x1b[90mETA:\x1b[0m {d}:{d:0>2}", .{ eta_m, eta_r });
+        const eta_parts = ui.secondsToHms(eta_s);
+        std.debug.print(
+            " \x1b[90m| ETA:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}",
+            .{ eta_parts.hours, eta_parts.minutes, eta_parts.seconds },
+        );
     }
     std.debug.print("\r", .{});
 }
@@ -986,6 +1004,7 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
         .skipped = 0,
         .failed = 0,
         .percent = 0,
+        .has_rendered_progress = false,
     };
 
     const script_run = ps_runner.runScriptDetailedStreaming(allocator, script_path, args.items, onImportScriptLine, &progress_state) catch {

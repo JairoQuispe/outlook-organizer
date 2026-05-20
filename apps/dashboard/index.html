@@ -1,0 +1,1048 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PST Outlook Analyzer - Dashboard</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0f7ff',
+                            100: '#e0effe',
+                            200: '#bae2fd',
+                            300: '#7ccbfd',
+                            400: '#38b2f6',
+                            500: '#0ea0e6',
+                            600: '#0280c7',
+                            700: '#0366a1',
+                            800: '#075685',
+                            900: '#0c486e',
+                            950: '#082f49',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Custom scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #020617;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1e293b;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #334155;
+        }
+        .drag-over {
+            border-color: #0ea0e6 !important;
+            background-color: rgba(14, 160, 230, 0.05) !important;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans flex flex-col">
+
+    <!-- Header -->
+    <header class="border-b border-slate-900 bg-slate-900/50 backdrop-blur sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="p-2 bg-brand-500/10 rounded-lg border border-brand-500/30 text-brand-400">
+                    <i data-lucide="mail" class="w-6 h-6"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold tracking-tight bg-gradient-to-r from-white via-slate-200 to-brand-400 bg-clip-text text-transparent">PST Outlook Analyzer</h1>
+                    <p class="text-xs text-slate-400">Estadísticas y Dashboard Interactivo</p>
+                </div>
+            </div>
+            <div class="flex items-center space-x-3 text-xs text-slate-400">
+                <span class="px-2.5 py-1 bg-slate-900 rounded-full border border-slate-800 flex items-center gap-1.5">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Offline Mode
+                </span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Container -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col space-y-8">
+
+        <!-- File Upload Area (Always visible if no file, small banner if file loaded) -->
+        <div id="upload-container" class="transition-all duration-300">
+            <div id="drop-zone" class="border-2 border-dashed border-slate-800 hover:border-brand-500/50 bg-slate-900/20 rounded-2xl p-10 text-center cursor-pointer transition-all flex flex-col items-center justify-center space-y-4 shadow-xl">
+                <input type="file" id="file-input" class="hidden" accept=".json">
+                <div class="p-4 bg-brand-500/5 rounded-full border border-brand-500/10 text-brand-400 shadow-inner">
+                    <i data-lucide="upload-cloud" class="w-10 h-10 animate-bounce"></i>
+                </div>
+                <div class="space-y-1">
+                    <h3 class="text-lg font-semibold text-slate-200">Sube tu archivo de estadísticas PST</h3>
+                    <p class="text-sm text-slate-400 max-w-md">Arrastra y suelta el archivo JSON generado con <code class="text-xs bg-slate-900 px-1.5 py-0.5 rounded text-brand-300">-ExportStatistics</code> o haz clic para buscarlo.</p>
+                </div>
+                <div class="text-xs text-slate-500 bg-slate-900/50 px-3 py-1.5 rounded-md border border-slate-800/80">
+                    Solo archivos .json generados por el analizador
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Indicator -->
+        <div id="loading-container" class="hidden flex flex-col items-center justify-center py-20 space-y-4">
+            <div class="relative w-16 h-16">
+                <!-- Outer ring -->
+                <div class="absolute inset-0 rounded-full border-4 border-slate-800"></div>
+                <!-- Spinning ring -->
+                <div class="absolute inset-0 rounded-full border-4 border-t-brand-500 border-r-transparent border-b-transparent border-l-transparent animate-spin"></div>
+            </div>
+            <div class="text-center">
+                <h3 class="text-lg font-semibold text-slate-200">Procesando archivo de estadísticas...</h3>
+                <p class="text-sm text-slate-500 max-w-xs mt-1">Estamos organizando y estructurando tus carpetas, gráficos e historiales del PST.</p>
+            </div>
+        </div>
+
+        <!-- Dashboard Content (Hidden by default, shown when data loaded) -->
+        <div id="dashboard-content" class="hidden space-y-8 animate-fade-in">
+            
+            <!-- Metadata Banner & Quick Reset -->
+            <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div class="flex items-center space-x-3 min-w-0">
+                    <i data-lucide="file-text" class="w-5 h-5 text-slate-400 shrink-0"></i>
+                    <div class="min-w-0">
+                        <p class="text-xs text-slate-500 font-medium">ARCHIVO ANALIZADO</p>
+                        <h2 id="meta-pst-path" class="text-sm font-semibold text-slate-200 truncate">C:\Path\To\PstFile.pst</h2>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-4 text-xs">
+                    <div class="text-right">
+                        <p class="text-slate-500">Generado el</p>
+                        <p id="meta-gen-date" class="font-semibold text-slate-300">2026-05-20 00:12:00</p>
+                    </div>
+                    <button id="btn-change-file" class="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 active:bg-slate-800 text-slate-200 font-semibold rounded-lg border border-slate-700/50 transition text-xs">
+                        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Cambiar Archivo
+                    </button>
+                </div>
+            </div>
+
+            <!-- Key Metrics Grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <!-- Total Emails -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-brand-500/10 rounded-lg text-brand-400 border border-brand-500/20">
+                        <i data-lucide="mail" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider">Total de Correos</p>
+                        <p id="metric-total-emails" class="text-2xl font-bold text-white mt-1">0</p>
+                    </div>
+                </div>
+                <!-- Total Size -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-indigo-500/10 rounded-lg text-indigo-400 border border-indigo-500/20">
+                        <i data-lucide="database" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider">Tamaño de Datos</p>
+                        <p id="metric-total-size" class="text-2xl font-bold text-white mt-1">0 B</p>
+                    </div>
+                </div>
+                <!-- Total Folders -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-amber-500/10 rounded-lg text-amber-400 border border-amber-500/20">
+                        <i data-lucide="folder" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider">Carpetas Totales</p>
+                        <p id="metric-total-folders" class="text-2xl font-bold text-white mt-1">0</p>
+                    </div>
+                </div>
+                <!-- File Size -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-emerald-500/10 rounded-lg text-emerald-400 border border-emerald-500/20">
+                        <i data-lucide="hard-drive" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider">Tamaño del PST</p>
+                        <p id="metric-file-size" class="text-2xl font-bold text-white mt-1">0 B</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visual Charts Row 1: Years Breakdown -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Year Items Bar Chart -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex flex-col space-y-4">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                        <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                            <i data-lucide="bar-chart-2" class="w-4 h-4 text-brand-400"></i> Distribución Anual (Cantidad)
+                        </h3>
+                    </div>
+                    <div class="relative min-h-[300px] flex items-center justify-center">
+                        <canvas id="chart-years-count"></canvas>
+                    </div>
+                </div>
+                <!-- Year Size Bar Chart -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex flex-col space-y-4">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                        <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                            <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-400"></i> Distribución Anual (Tamaño)
+                        </h3>
+                    </div>
+                    <div class="relative min-h-[300px] flex items-center justify-center">
+                        <canvas id="chart-years-size"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visual Charts Row 2: Timeline Monthly Evolution -->
+            <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex flex-col space-y-4">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div class="space-y-1">
+                        <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                            <i data-lucide="activity" class="w-4 h-4 text-emerald-400"></i> Evolución Mensual Histórica
+                        </h3>
+                        <p class="text-xs text-slate-400">Historial temporal de correos electrónicos agrupados por mes</p>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <select id="select-timeline-metric" class="bg-slate-950 border border-slate-800 text-xs text-slate-300 rounded px-2 py-1 focus:outline-none focus:border-brand-500">
+                            <option value="count">Cantidad de Items</option>
+                            <option value="size">Tamaño de Items</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="relative min-h-[320px]">
+                    <canvas id="chart-months-timeline"></canvas>
+                </div>
+            </div>
+
+            <!-- Visual Charts Row 3: Folders Highlights & Lists -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Top Folders by Items -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex flex-col space-y-4">
+                    <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2 border-b border-slate-800 pb-3">
+                        <i data-lucide="award" class="w-4 h-4 text-amber-400"></i> Carpetas con más Correos
+                    </h3>
+                    <div id="list-top-items" class="divide-y divide-slate-900/60 overflow-y-auto max-h-[300px] pr-1 space-y-2">
+                        <!-- Items injected dynamically -->
+                    </div>
+                </div>
+
+                <!-- Top Folders by Size -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex flex-col space-y-4">
+                    <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2 border-b border-slate-800 pb-3">
+                        <i data-lucide="trending-up" class="w-4 h-4 text-red-400"></i> Carpetas más Pesadas
+                    </h3>
+                    <div id="list-top-size" class="divide-y divide-slate-900/60 overflow-y-auto max-h-[300px] pr-1 space-y-2">
+                        <!-- Items injected dynamically -->
+                    </div>
+                </div>
+
+                <!-- Folders Distribution Chart (Donut) -->
+                <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex flex-col space-y-4">
+                    <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2 border-b border-slate-800 pb-3">
+                        <i data-lucide="pie-chart" class="w-4 h-4 text-brand-400"></i> Distribución de Carpetas
+                    </h3>
+                    <div class="relative flex-1 min-h-[240px] flex items-center justify-center">
+                        <canvas id="chart-folders-donut"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detailed Folders Directory -->
+            <div class="bg-slate-900/40 border border-slate-900 rounded-xl p-5 shadow-lg flex flex-col space-y-4">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+                    <div class="space-y-1">
+                        <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                            <i data-lucide="folder-open" class="w-4 h-4 text-brand-400"></i> Directorio de Carpetas
+                        </h3>
+                        <p class="text-xs text-slate-400">Listado detallado de todas las carpetas, correos y rangos de fechas</p>
+                    </div>
+                    <!-- Search Filter -->
+                    <div class="relative max-w-xs w-full">
+                        <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+                            <i data-lucide="search" class="w-4 h-4"></i>
+                        </span>
+                        <input id="input-folder-search" type="text" placeholder="Buscar carpeta..." class="w-full bg-slate-950 border border-slate-800 text-xs text-slate-200 pl-9 pr-4 py-2 rounded-lg focus:outline-none focus:border-brand-500 placeholder-slate-500">
+                    </div>
+                </div>
+
+                <!-- Desktop Table View -->
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs border-collapse">
+                        <thead>
+                            <tr class="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider">
+                                <th class="py-3 px-4">Carpeta</th>
+                                <th class="py-3 px-4 text-right">Items</th>
+                                <th class="py-3 px-4 text-right">Tamaño</th>
+                                <th class="py-3 px-4">Primer Correo</th>
+                                <th class="py-3 px-4">Último Correo</th>
+                                <th class="py-3 px-4 text-center">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-folders-body" class="divide-y divide-slate-900/60 text-slate-300">
+                            <!-- Dynamic Rows -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination -->
+                <div class="flex flex-col sm:flex-row items-center justify-between border-t border-slate-800 pt-4 gap-4 text-xs">
+                    <div class="text-slate-400">
+                        Mostrando <span id="pagination-info" class="font-semibold text-slate-200">0 - 0 de 0</span> carpetas
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <span class="text-slate-400">Filas por página:</span>
+                        <select id="select-page-size" class="bg-slate-950 border border-slate-800 text-slate-300 rounded px-2 py-1 focus:outline-none focus:border-brand-500">
+                            <option value="15">15</option>
+                            <option value="30">30</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                        <div class="flex items-center space-x-1 pl-4">
+                            <button id="btn-page-prev" class="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-300 rounded border border-slate-700/40 transition">
+                                <i data-lucide="chevron-left" class="w-4 h-4"></i>
+                            </button>
+                            <span id="page-num-indicator" class="px-2.5 py-1 bg-slate-900 rounded border border-slate-800 text-slate-300 font-semibold">1 / 1</span>
+                            <button id="btn-page-next" class="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-300 rounded border border-slate-700/40 transition">
+                                <i data-lucide="chevron-right" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- Folder Detail Modal (Drawer) -->
+    <div id="modal-folder-details" class="fixed inset-0 z-50 overflow-hidden hidden" aria-labelledby="slide-over-title" role="dialog" aria-modal="true">
+        <div class="absolute inset-0 overflow-hidden">
+            <!-- Background overlay -->
+            <div id="modal-overlay" class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity duration-300 opacity-0"></div>
+
+            <div class="pointer-events-none fixed inset-y-0 right-0 flex max-w-full pl-10">
+                <!-- Slide-over panel -->
+                <div id="modal-panel" class="pointer-events-auto w-screen max-w-md transform transition duration-300 ease-in-out translate-x-full">
+                    <div class="flex h-full flex-col overflow-y-auto bg-slate-900 border-l border-slate-800 shadow-2xl">
+                        
+                        <!-- Header -->
+                        <div class="bg-slate-950 p-6 border-b border-slate-800">
+                            <div class="flex items-start justify-between">
+                                <div class="space-y-1 min-w-0 pr-4">
+                                    <p class="text-[10px] font-bold text-brand-400 uppercase tracking-wider">Detalles de Carpeta</p>
+                                    <h2 id="modal-folder-name" class="text-base font-bold text-white truncate">Inbox</h2>
+                                </div>
+                                <div class="ml-3 flex h-7 items-center">
+                                    <button id="btn-close-modal" class="rounded-md bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800 p-1.5 focus:outline-none">
+                                        <i data-lucide="x" class="w-5 h-5"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Content body -->
+                        <div class="flex-1 p-6 space-y-6">
+                            <!-- Folder Metrics Card -->
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                                    <p class="text-[10px] text-slate-500 uppercase font-semibold">Total Items</p>
+                                    <p id="modal-metric-count" class="text-lg font-bold text-slate-100 mt-0.5">0</p>
+                                </div>
+                                <div class="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                                    <p class="text-[10px] text-slate-500 uppercase font-semibold">Tamaño</p>
+                                    <p id="modal-metric-size" class="text-lg font-bold text-slate-100 mt-0.5">0 B</p>
+                                </div>
+                            </div>
+
+                            <!-- Range Info -->
+                            <div class="bg-slate-950/50 border border-slate-800 rounded-lg p-4 space-y-2 text-xs">
+                                <div class="flex items-center justify-between text-slate-400">
+                                    <span class="flex items-center gap-1.5"><i data-lucide="calendar" class="w-3.5 h-3.5 text-amber-500"></i> Correo más antiguo</span>
+                                    <span id="modal-date-oldest" class="text-slate-200 font-semibold">-</span>
+                                </div>
+                                <div class="flex items-center justify-between text-slate-400 border-t border-slate-900 pt-2">
+                                    <span class="flex items-center gap-1.5"><i data-lucide="zap" class="w-3.5 h-3.5 text-brand-400"></i> Correo más reciente</span>
+                                    <span id="modal-date-newest" class="text-slate-200 font-semibold">-</span>
+                                </div>
+                            </div>
+
+                            <!-- Folder Year Breakdown Chart -->
+                            <div class="space-y-3">
+                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                                    <i data-lucide="bar-chart-2" class="w-4 h-4 text-brand-400"></i> Historial por Año
+                                </h3>
+                                <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 relative h-[200px]">
+                                    <canvas id="chart-modal-years"></canvas>
+                                </div>
+                            </div>
+
+                            <!-- Year List Detailed -->
+                            <div class="space-y-3">
+                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                                    <i data-lucide="list" class="w-4 h-4 text-indigo-400"></i> desglose Anual Detallado
+                                </h3>
+                                <div class="bg-slate-950 border border-slate-800 rounded-lg divide-y divide-slate-900 overflow-hidden text-xs max-h-[220px] overflow-y-auto">
+                                    <table class="w-full text-left">
+                                        <thead>
+                                            <tr class="bg-slate-900 border-b border-slate-800 text-slate-500 font-bold">
+                                                <th class="py-2 px-3">Año</th>
+                                                <th class="py-2 px-3 text-right">Items</th>
+                                                <th class="py-2 px-3 text-right">Tamaño</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="modal-table-years-body" class="text-slate-300">
+                                            <!-- Injected rows -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Month List Detailed -->
+                            <div class="space-y-3">
+                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                                    <i data-lucide="calendar-days" class="w-4 h-4 text-emerald-400"></i> Desglose Mensual Detallado
+                                </h3>
+                                <div class="bg-slate-950 border border-slate-800 rounded-lg divide-y divide-slate-900 overflow-hidden text-xs max-h-[220px] overflow-y-auto">
+                                    <table class="w-full text-left">
+                                        <thead>
+                                            <tr class="bg-slate-900 border-b border-slate-800 text-slate-500 font-bold">
+                                                <th class="py-2 px-3">Mes</th>
+                                                <th class="py-2 px-3 text-right">Items</th>
+                                                <th class="py-2 px-3 text-right">Tamaño</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="modal-table-months-body" class="text-slate-300">
+                                            <!-- Injected rows -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="border-t border-slate-900 py-6 bg-slate-950 text-center text-xs text-slate-500 mt-auto">
+        <div class="max-w-7xl mx-auto px-4">
+            <p>&copy; 2026 PST Outlook Analyzer. Herramienta de visualización local.</p>
+        </div>
+    </footer>
+
+    <!-- App JavaScript Logic -->
+    <script>
+        // Global State Variables
+        let pstData = null;
+        let activeCharts = {};
+        let currentPage = 1;
+        let pageSize = 15;
+
+        // DOM elements
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const uploadContainer = document.getElementById('upload-container');
+        const loadingContainer = document.getElementById('loading-container');
+        const dashboardContent = document.getElementById('dashboard-content');
+        const btnChangeFile = document.getElementById('btn-change-file');
+        const btnCloseModal = document.getElementById('btn-close-modal');
+        const modalFolderDetails = document.getElementById('modal-folder-details');
+        const modalOverlay = document.getElementById('modal-overlay');
+        const modalPanel = document.getElementById('modal-panel');
+        const selectTimelineMetric = document.getElementById('select-timeline-metric');
+        const inputFolderSearch = document.getElementById('input-folder-search');
+
+        // File drag and drop events
+        dropZone.addEventListener('click', () => fileInput.click());
+        
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('drag-over');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('drag-over');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        btnChangeFile.addEventListener('click', () => {
+            uploadContainer.classList.remove('hidden');
+            dashboardContent.classList.add('hidden');
+            fileInput.value = '';
+        });
+
+        btnCloseModal.addEventListener('click', hideModal);
+        modalOverlay.addEventListener('click', hideModal);
+
+        selectTimelineMetric.addEventListener('change', () => {
+            if (pstData) updateTimelineChart();
+        });
+
+        inputFolderSearch.addEventListener('input', () => {
+            if (pstData) {
+                currentPage = 1;
+                renderFoldersTable();
+            }
+        });
+
+        const btnPagePrev = document.getElementById('btn-page-prev');
+        const btnPageNext = document.getElementById('btn-page-next');
+        const selectPageSize = document.getElementById('select-page-size');
+
+        btnPagePrev.addEventListener('click', () => {
+            if (currentPage > 1) {
+                currentPage--;
+                renderFoldersTable();
+            }
+        });
+
+        btnPageNext.addEventListener('click', () => {
+            if (!pstData) return;
+            const searchVal = inputFolderSearch.value.toLowerCase().trim();
+            const filteredFolders = pstData.folders.filter(f => 
+                f.path.toLowerCase().includes(searchVal)
+            );
+            const maxPage = Math.ceil(filteredFolders.length / pageSize);
+            if (currentPage < maxPage) {
+                currentPage++;
+                renderFoldersTable();
+            }
+        });
+
+        selectPageSize.addEventListener('change', (e) => {
+            pageSize = parseInt(e.target.value);
+            currentPage = 1;
+            renderFoldersTable();
+        });
+
+        // Initialize Lucide Icons
+        document.addEventListener('DOMContentLoaded', () => {
+            lucide.createIcons();
+        });
+
+        // Handle the loaded file
+        function handleFile(file) {
+            if (file.type !== 'application/json' && !file.name.endsWith('.json')) {
+                alert('Por favor, selecciona un archivo JSON válido.');
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    if (data.type !== 'pstStatistics') {
+                        alert('El archivo no parece ser un archivo de estadísticas de PST válido.');
+                        return;
+                    }
+                    pstData = data;
+                    currentPage = 1;
+                    renderDashboard();
+                } catch (error) {
+                    console.error(error);
+                    alert('Error al leer el archivo JSON: ' + error.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // Render Dashboard
+        function renderDashboard() {
+            // Hide upload, show loading spinner
+            uploadContainer.classList.add('hidden');
+            loadingContainer.classList.remove('hidden');
+            dashboardContent.classList.add('hidden');
+
+            // Defer execution using setTimeout to let browser render the loading state first
+            setTimeout(() => {
+                try {
+                    // Step 1: Metadata & Key Metrics updates
+                    document.getElementById('meta-pst-path').innerText = pstData.pstPath || pstData.storeId || 'N/A';
+                    document.getElementById('meta-gen-date').innerText = formatDate(pstData.generatedAt);
+
+                    document.getElementById('metric-total-emails').innerText = formatNum(pstData.globalStats.totalItems);
+                    document.getElementById('metric-total-size').innerText = pstData.globalStats.totalSizeHuman || '0 B';
+                    document.getElementById('metric-total-folders').innerText = formatNum(pstData.foldersCount);
+                    document.getElementById('metric-file-size').innerText = pstData.pstSizeHuman || '0 B';
+
+                    // Clean existing charts if any
+                    Object.values(activeCharts).forEach(chart => chart.destroy());
+                    activeCharts = {};
+
+                    // Step 2: Next frame - Lists & Directory Table
+                    setTimeout(() => {
+                        try {
+                            renderTopFolders();
+                            renderFoldersTable();
+
+                            // Step 3: Next frame - Chart JS Initializations
+                            setTimeout(() => {
+                                try {
+                                    renderYearsCharts();
+                                    updateTimelineChart();
+                                    renderDonutChart();
+
+                                    // Complete transition: hide loading, show content
+                                    loadingContainer.classList.add('hidden');
+                                    dashboardContent.classList.remove('hidden');
+                                    lucide.createIcons();
+                                } catch (chartErr) {
+                                    console.error("Error rendering charts: ", chartErr);
+                                    loadingContainer.classList.add('hidden');
+                                    dashboardContent.classList.remove('hidden');
+                                }
+                            }, 50);
+
+                        } catch (listErr) {
+                            console.error("Error rendering lists/tables: ", listErr);
+                            loadingContainer.classList.add('hidden');
+                        }
+                    }, 50);
+
+                } catch (metaErr) {
+                    console.error("Error setting metadata/metrics: ", metaErr);
+                    loadingContainer.classList.add('hidden');
+                }
+            }, 50);
+        }
+
+        // Render Years charts
+        function renderYearsCharts() {
+            const sortedYears = [...pstData.globalStats.yearBreakdown].sort((a,b) => a.year - b.year);
+            const labels = sortedYears.map(item => item.year);
+            const counts = sortedYears.map(item => item.count);
+            const sizesMB = sortedYears.map(item => (item.sizeBytes / (1024 * 1024)).toFixed(2));
+
+            // Chart Years Count
+            const ctxCount = document.getElementById('chart-years-count').getContext('2d');
+            activeCharts.yearsCount = new Chart(ctxCount, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Correos electrónicos',
+                        data: counts,
+                        backgroundColor: '#0ea0e6',
+                        borderColor: '#0280c7',
+                        borderWidth: 1,
+                        borderRadius: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+
+            // Chart Years Size (MB)
+            const ctxSize = document.getElementById('chart-years-size').getContext('2d');
+            activeCharts.yearsSize = new Chart(ctxSize, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Tamaño (MB)',
+                        data: sizesMB,
+                        backgroundColor: '#6366f1',
+                        borderColor: '#4f46e5',
+                        borderWidth: 1,
+                        borderRadius: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', callback: value => value + ' MB' } },
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+        }
+
+        // Update Timeline Chart (Monthly)
+        function updateTimelineChart() {
+            if (activeCharts.timeline) {
+                activeCharts.timeline.destroy();
+            }
+
+            const metric = selectTimelineMetric.value;
+            const sortedMonths = [...pstData.globalStats.monthBreakdown].sort((a,b) => a.month.localeCompare(b.month));
+            const labels = sortedMonths.map(item => item.month);
+            
+            let datasetLabel = '';
+            let data = [];
+            let color = '';
+            let fillGradientColor = '';
+
+            if (metric === 'count') {
+                datasetLabel = 'Cantidad de Items';
+                data = sortedMonths.map(item => item.count);
+                color = '#10b981';
+                fillGradientColor = 'rgba(16, 185, 129, 0.05)';
+            } else {
+                datasetLabel = 'Tamaño (MB)';
+                data = sortedMonths.map(item => (item.sizeBytes / (1024 * 1024)).toFixed(2));
+                color = '#f59e0b';
+                fillGradientColor = 'rgba(245, 158, 11, 0.05)';
+            }
+
+            const ctxTimeline = document.getElementById('chart-months-timeline').getContext('2d');
+            
+            // Create subtle gradient for area fill
+            const gradient = ctxTimeline.createLinearGradient(0, 0, 0, 300);
+            gradient.addColorStop(0, fillGradientColor);
+            gradient.addColorStop(1, 'rgba(15, 23, 42, 0)');
+
+            activeCharts.timeline = new Chart(ctxTimeline, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: datasetLabel,
+                        data: data,
+                        borderColor: color,
+                        backgroundColor: gradient,
+                        fill: true,
+                        borderWidth: 2,
+                        tension: 0.3,
+                        pointBackgroundColor: color,
+                        pointRadius: 3,
+                        pointHoverRadius: 5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', callback: value => metric === 'size' ? value + ' MB' : value } },
+                        x: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } }
+                    },
+                    plugins: {
+                        legend: { display: true, labels: { color: '#94a3b8' } }
+                    }
+                }
+            });
+        }
+
+        // Render Donut Chart for major folders (percentage of total size)
+        function renderDonutChart() {
+            const sortedBySize = [...pstData.folders].sort((a,b) => b.sizeBytes - a.sizeBytes);
+            const folders = sortedBySize.slice(0, 5);
+            const otherSizeBytes = sortedBySize.slice(5).reduce((sum, f) => sum + (f.sizeBytes || 0), 0);
+
+            const labels = folders.map(f => f.path);
+            const sizesMB = folders.map(f => ((f.sizeBytes || 0) / (1024 * 1024)).toFixed(2));
+
+            if (otherSizeBytes > 0) {
+                labels.push('Otras');
+                sizesMB.push((otherSizeBytes / (1024 * 1024)).toFixed(2));
+            }
+
+            const ctxDonut = document.getElementById('chart-folders-donut').getContext('2d');
+            activeCharts.donut = new Chart(ctxDonut, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: sizesMB,
+                        backgroundColor: [
+                            '#0ea0e6',
+                            '#6366f1',
+                            '#10b981',
+                            '#f59e0b',
+                            '#ef4444',
+                            '#475569'
+                        ],
+                        borderWidth: 1,
+                        borderColor: '#0f172a'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: '#94a3b8',
+                                font: { size: 10 },
+                                boxWidth: 10
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => ` ${context.label}: ${context.raw} MB`
+                            }
+                        }
+                    },
+                    cutout: '65%'
+                }
+            });
+        }
+
+        // Render Top folders lists
+        function renderTopFolders() {
+            // Sort by Items
+            const byItems = [...pstData.folders]
+                .sort((a, b) => b.itemCount - a.itemCount)
+                .slice(0, 5);
+
+            const listItemsEl = document.getElementById('list-top-items');
+            listItemsEl.innerHTML = byItems.map((f, idx) => `
+                <div class="flex items-center justify-between p-2.5 hover:bg-slate-900/40 rounded-lg transition-all cursor-pointer border border-transparent hover:border-slate-800/40" onclick="showFolderDetails('${encodeURIComponent(f.path)}')">
+                    <div class="flex items-center space-x-2 min-w-0">
+                        <span class="text-xs font-bold text-slate-500 w-4">${idx + 1}</span>
+                        <div class="min-w-0">
+                            <p class="text-xs font-semibold text-slate-200 truncate" title="${f.path}">${f.path}</p>
+                            <p class="text-[10px] text-slate-400">${f.sizeHuman || '0 B'}</p>
+                        </div>
+                    </div>
+                    <span class="text-xs font-bold bg-brand-500/10 text-brand-400 border border-brand-500/10 px-2 py-0.5 rounded-full shrink-0">${formatNum(f.itemCount)}</span>
+                </div>
+            `).join('');
+
+            // Sort by Size
+            const bySize = [...pstData.folders]
+                .sort((a, b) => b.sizeBytes - a.sizeBytes)
+                .slice(0, 5);
+
+            const listSizeEl = document.getElementById('list-top-size');
+            listSizeEl.innerHTML = bySize.map((f, idx) => `
+                <div class="flex items-center justify-between p-2.5 hover:bg-slate-900/40 rounded-lg transition-all cursor-pointer border border-transparent hover:border-slate-800/40" onclick="showFolderDetails('${encodeURIComponent(f.path)}')">
+                    <div class="flex items-center space-x-2 min-w-0">
+                        <span class="text-xs font-bold text-slate-500 w-4">${idx + 1}</span>
+                        <div class="min-w-0">
+                            <p class="text-xs font-semibold text-slate-200 truncate" title="${f.path}">${f.path}</p>
+                            <p class="text-[10px] text-slate-400">${formatNum(f.itemCount)} correos</p>
+                        </div>
+                    </div>
+                    <span class="text-xs font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/10 px-2 py-0.5 rounded-full shrink-0">${f.sizeHuman || '0 B'}</span>
+                </div>
+            `).join('');
+        }
+
+        // Render Folder List Table
+        function renderFoldersTable() {
+            const tableBody = document.getElementById('table-folders-body');
+            const searchVal = inputFolderSearch.value.toLowerCase().trim();
+
+            const filteredFolders = pstData.folders.filter(f => 
+                f.path.toLowerCase().includes(searchVal)
+            );
+
+            const totalFolders = filteredFolders.length;
+            const maxPage = Math.ceil(totalFolders / pageSize) || 1;
+
+            if (currentPage > maxPage) {
+                currentPage = maxPage;
+            }
+
+            // Update pagination controls UI
+            document.getElementById('page-num-indicator').innerText = `${currentPage} / ${maxPage}`;
+            document.getElementById('btn-page-prev').disabled = (currentPage === 1);
+            document.getElementById('btn-page-next').disabled = (currentPage === maxPage);
+
+            const startIdx = (currentPage - 1) * pageSize;
+            const endIdx = Math.min(startIdx + pageSize, totalFolders);
+
+            document.getElementById('pagination-info').innerText = `${totalFolders > 0 ? startIdx + 1 : 0} - ${endIdx} de ${totalFolders}`;
+
+            if (totalFolders === 0) {
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="py-8 text-center text-slate-500">
+                            No se encontraron carpetas coincidentes
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            const pagedFolders = filteredFolders.slice(startIdx, endIdx);
+
+            tableBody.innerHTML = pagedFolders.map(f => `
+                <tr class="hover:bg-slate-900/20 border-b border-slate-900 transition-all text-xs">
+                    <td class="py-3 px-4 font-semibold text-slate-200 max-w-sm truncate" title="${f.path}">${f.path}</td>
+                    <td class="py-3 px-4 text-right font-bold text-slate-300">${formatNum(f.itemCount)}</td>
+                    <td class="py-3 px-4 text-right text-indigo-300 font-bold">${f.sizeHuman || '-'}</td>
+                    <td class="py-3 px-4 text-slate-400">${formatSimpleDate(f.oldestEmail)}</td>
+                    <td class="py-3 px-4 text-slate-400">${formatSimpleDate(f.newestEmail)}</td>
+                    <td class="py-3 px-4 text-center">
+                        <button onclick="showFolderDetails('${encodeURIComponent(f.path)}')" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-800 text-slate-300 border border-slate-700/40 rounded transition-all inline-flex items-center gap-1 font-semibold">
+                            <i data-lucide="eye" class="w-3.5 h-3.5 text-brand-400"></i> Ver Stats
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+
+            lucide.createIcons();
+        }
+
+        // Folder detailed modal trigger
+        function showFolderDetails(encodedPath) {
+            const folderPath = decodeURIComponent(encodedPath);
+            const folder = pstData.folders.find(f => f.path === folderPath);
+            if (!folder) return;
+
+            document.getElementById('modal-folder-name').innerText = folder.path;
+            document.getElementById('modal-metric-count').innerText = formatNum(folder.itemCount);
+            document.getElementById('modal-metric-size').innerText = folder.sizeHuman || '0 B';
+            document.getElementById('modal-date-oldest').innerText = formatSimpleDate(folder.oldestEmail, 'Sin correos');
+            document.getElementById('modal-date-newest').innerText = formatSimpleDate(folder.newestEmail, 'Sin correos');
+
+            // Render detailed year table inside modal
+            const tableYearsBody = document.getElementById('modal-table-years-body');
+            const sortedYears = [...folder.yearBreakdown].sort((a, b) => b.year - a.year);
+            tableYearsBody.innerHTML = sortedYears.map(y => `
+                <tr class="hover:bg-slate-900/50">
+                    <td class="py-2 px-3 font-semibold text-slate-100">${y.year}</td>
+                    <td class="py-2 px-3 text-right font-bold text-brand-400">${formatNum(y.count)}</td>
+                    <td class="py-2 px-3 text-right text-indigo-300 font-semibold">${y.sizeHuman || '0 B'}</td>
+                </tr>
+            `).join('');
+
+            // Render detailed month table inside modal
+            const tableMonthsBody = document.getElementById('modal-table-months-body');
+            if (folder.monthBreakdown && folder.monthBreakdown.length > 0) {
+                const sortedMonths = [...folder.monthBreakdown].sort((a, b) => b.month.localeCompare(a.month));
+                tableMonthsBody.innerHTML = sortedMonths.map(m => `
+                    <tr class="hover:bg-slate-900/50">
+                        <td class="py-2 px-3 font-semibold text-slate-100">${m.month}</td>
+                        <td class="py-2 px-3 text-right font-bold text-emerald-400">${formatNum(m.count)}</td>
+                        <td class="py-2 px-3 text-right text-indigo-300 font-semibold">${m.sizeHuman || '0 B'}</td>
+                    </tr>
+                `).join('');
+            } else {
+                tableMonthsBody.innerHTML = `
+                    <tr>
+                        <td colspan="3" class="py-4 text-center text-slate-500">No hay desglose mensual disponible</td>
+                    </tr>
+                `;
+            }
+
+            // Render Year distribution inside modal
+            const labels = [...sortedYears].sort((a,b)=>a.year-b.year).map(y => y.year);
+            const counts = [...sortedYears].sort((a,b)=>a.year-b.year).map(y => y.count);
+
+            if (activeCharts.modalYears) {
+                activeCharts.modalYears.destroy();
+            }
+
+            const ctxModal = document.getElementById('chart-modal-years').getContext('2d');
+            activeCharts.modalYears = new Chart(ctxModal, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Correos',
+                        data: counts,
+                        backgroundColor: '#0ea0e6',
+                        borderColor: '#0280c7',
+                        borderWidth: 1,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', font: { size: 9 } } },
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 9 } } }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+
+            // Show drawer
+            modalFolderDetails.classList.remove('hidden');
+            setTimeout(() => {
+                modalOverlay.classList.remove('opacity-0');
+                modalPanel.classList.remove('translate-x-full');
+            }, 50);
+
+            lucide.createIcons();
+        }
+
+        function hideModal() {
+            modalOverlay.classList.add('opacity-0');
+            modalPanel.classList.add('translate-x-full');
+            setTimeout(() => {
+                modalFolderDetails.classList.add('hidden');
+            }, 300);
+        }
+
+        // Helper: format numbers with thousands separator
+        function formatNum(num) {
+            return Number(num).toLocaleString('es-ES');
+        }
+
+        // Helper: format date cleanly
+        function formatDate(dateStr) {
+            if (!dateStr) return '-';
+            try {
+                const date = new Date(dateStr);
+                return date.toLocaleString('es-ES', { 
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit'
+                });
+            } catch(e) {
+                return dateStr;
+            }
+        }
+
+        // Helper: simple dates
+        function formatSimpleDate(dateStr, fallback = '-') {
+            if (!dateStr) return fallback;
+            try {
+                const date = new Date(dateStr);
+                return date.toLocaleDateString('es-ES', {
+                    year: 'numeric', month: '2-digit', day: '2-digit'
+                });
+            } catch(e) {
+                return dateStr;
+            }
+        }
+    </script>
+</body>
+</html>

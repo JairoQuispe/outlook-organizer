@@ -256,13 +256,28 @@ fn readStdinLine(buf: []u8) !?[]u8 {
     return buf[0..pos];
 }
 
-pub fn printProgressBar(percent: u32, elapsed_ms: i64, label: []const u8) void {
+const DurationParts = struct {
+    hours: i64,
+    minutes: i64,
+    seconds: i64,
+};
+
+pub fn secondsToHms(total_seconds: i64) DurationParts {
+    const safe_seconds = if (total_seconds < 0) 0 else total_seconds;
+    const hours = @divTrunc(safe_seconds, 3600);
+    const remaining_after_hours = @rem(safe_seconds, 3600);
+    const minutes = @divTrunc(remaining_after_hours, 60);
+    const seconds = @rem(remaining_after_hours, 60);
+    return .{ .hours = hours, .minutes = minutes, .seconds = seconds };
+}
+
+pub fn printProgressBar(percent: u32, label: []const u8) void {
     const bar_width: u32 = 30;
     const filled = (percent * bar_width) / 100;
     const empty = bar_width - filled;
 
-    // Build bar string
-    std.debug.print("\r  \x1b[36m{s}\x1b[0m [", .{label});
+    // Clear line and print label + bar
+    std.debug.print("\r\x1b[2K  \x1b[36m{s}\x1b[0m [", .{label});
 
     var i: u32 = 0;
     while (i < filled) : (i += 1) {
@@ -273,28 +288,5 @@ pub fn printProgressBar(percent: u32, elapsed_ms: i64, label: []const u8) void {
         std.debug.print("\x1b[90m░\x1b[0m", .{});
     }
 
-    // ETA calculation
-    const elapsed_sec = @divTrunc(elapsed_ms, 1000);
-    if (percent > 0 and percent < 100) {
-        const total_estimated = @divTrunc(elapsed_ms * 100, @as(i64, @intCast(percent)));
-        const remaining_ms = total_estimated - elapsed_ms;
-        const remaining_sec = @divTrunc(remaining_ms, 1000);
-        const rem_min = @divTrunc(remaining_sec, 60);
-        const rem_s = @rem(remaining_sec, 60);
-
-        const el_min = @divTrunc(elapsed_sec, 60);
-        const el_s = @rem(elapsed_sec, 60);
-
-        std.debug.print("] {d}%  Transcurrido: {d}:{d:0>2}  ETA: {d}:{d:0>2}   ", .{
-            percent,
-            el_min,
-            el_s,
-            rem_min,
-            rem_s,
-        });
-    } else {
-        const el_min = @divTrunc(elapsed_sec, 60);
-        const el_s = @rem(elapsed_sec, 60);
-        std.debug.print("] {d}%  Transcurrido: {d}:{d:0>2}   ", .{ percent, el_min, el_s });
-    }
+    std.debug.print("] {d}%", .{percent});
 }
