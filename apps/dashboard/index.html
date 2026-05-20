@@ -125,6 +125,13 @@
                     </div>
                 </div>
                 <div class="flex flex-wrap items-center gap-4 text-xs">
+                    <!-- Global Year Filter -->
+                    <div class="flex items-center space-x-2 bg-slate-950/65 px-3 py-1.5 rounded-lg border border-slate-800/80">
+                        <span class="text-slate-400 flex items-center gap-1"><i data-lucide="filter" class="w-3.5 h-3.5 text-brand-400"></i> Año Global:</span>
+                        <select id="select-global-year" class="bg-transparent text-slate-100 font-bold focus:outline-none cursor-pointer">
+                            <option value="all" class="bg-slate-950 text-slate-100">Todos los años</option>
+                        </select>
+                    </div>
                     <div class="text-right">
                         <p class="text-slate-500">Generado el</p>
                         <p id="meta-gen-date" class="font-semibold text-slate-300">2026-05-20 00:12:00</p>
@@ -281,12 +288,32 @@
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-xs border-collapse">
                         <thead>
-                            <tr class="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider">
-                                <th class="py-3 px-4">Carpeta</th>
-                                <th class="py-3 px-4 text-right">Items</th>
-                                <th class="py-3 px-4 text-right">Tamaño</th>
-                                <th class="py-3 px-4">Primer Correo</th>
-                                <th class="py-3 px-4">Último Correo</th>
+                            <tr class="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider select-none">
+                                <th class="py-3 px-4 cursor-pointer hover:text-white transition-colors" onclick="handleHeaderSort('path')">
+                                    <div class="flex items-center gap-1.5">
+                                        Carpeta <i id="sort-icon-path" data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-slate-500"></i>
+                                    </div>
+                                </th>
+                                <th class="py-3 px-4 text-right cursor-pointer hover:text-white transition-colors" onclick="handleHeaderSort('itemCount')">
+                                    <div class="flex items-center justify-end gap-1.5">
+                                        Items <i id="sort-icon-itemCount" data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-slate-500"></i>
+                                    </div>
+                                </th>
+                                <th class="py-3 px-4 text-right cursor-pointer hover:text-white transition-colors" onclick="handleHeaderSort('sizeBytes')">
+                                    <div class="flex items-center justify-end gap-1.5">
+                                        Tamaño <i id="sort-icon-sizeBytes" data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-slate-500"></i>
+                                    </div>
+                                </th>
+                                <th class="py-3 px-4 cursor-pointer hover:text-white transition-colors" onclick="handleHeaderSort('oldestEmail')">
+                                    <div class="flex items-center gap-1.5">
+                                        Primer Correo <i id="sort-icon-oldestEmail" data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-slate-500"></i>
+                                    </div>
+                                </th>
+                                <th class="py-3 px-4 cursor-pointer hover:text-white transition-colors" onclick="handleHeaderSort('newestEmail')">
+                                    <div class="flex items-center gap-1.5">
+                                        Último Correo <i id="sort-icon-newestEmail" data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-slate-500"></i>
+                                    </div>
+                                </th>
                                 <th class="py-3 px-4 text-center">Acciones</th>
                             </tr>
                         </thead>
@@ -451,6 +478,9 @@
         let activeCharts = {};
         let currentPage = 1;
         let pageSize = 15;
+        let selectedYear = 'all';
+        let sortField = 'path';
+        let sortOrder = 'asc';
 
         // DOM elements
         const dropZone = document.getElementById('drop-zone');
@@ -465,6 +495,7 @@
         const modalPanel = document.getElementById('modal-panel');
         const selectTimelineMetric = document.getElementById('select-timeline-metric');
         const inputFolderSearch = document.getElementById('input-folder-search');
+        const selectGlobalYear = document.getElementById('select-global-year');
 
         // File drag and drop events
         dropZone.addEventListener('click', () => fileInput.click());
@@ -504,6 +535,14 @@
 
         selectTimelineMetric.addEventListener('change', () => {
             if (pstData) updateTimelineChart();
+        });
+
+        selectGlobalYear.addEventListener('change', (e) => {
+            selectedYear = e.target.value;
+            if (pstData) {
+                currentPage = 1;
+                updateMetricsAndCharts();
+            }
         });
 
         inputFolderSearch.addEventListener('input', () => {
@@ -574,6 +613,34 @@
             reader.readAsText(file);
         }
 
+        // Helper to format bytes to human readable format
+        function formatBytesHuman(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Populate Year Selector Dropdown
+        function populateYearSelector() {
+            const yearSelect = document.getElementById('select-global-year');
+            yearSelect.innerHTML = '<option value="all" class="bg-slate-950 text-slate-100">Todos los años</option>';
+            
+            if (pstData && pstData.globalStats && pstData.globalStats.yearBreakdown) {
+                const sortedYears = [...pstData.globalStats.yearBreakdown].sort((a,b) => b.year - a.year);
+                sortedYears.forEach(y => {
+                    const opt = document.createElement('option');
+                    opt.value = y.year.toString();
+                    opt.className = 'bg-slate-950 text-slate-100';
+                    opt.innerText = `${y.year} (${formatNum(y.count)} corr.)`;
+                    yearSelect.appendChild(opt);
+                });
+            }
+            selectedYear = 'all';
+            yearSelect.value = 'all';
+        }
+
         // Render Dashboard
         function renderDashboard() {
             // Hide upload, show loading spinner
@@ -584,54 +651,75 @@
             // Defer execution using setTimeout to let browser render the loading state first
             setTimeout(() => {
                 try {
-                    // Step 1: Metadata & Key Metrics updates
+                    // Step 1: Metadata updates
                     document.getElementById('meta-pst-path').innerText = pstData.pstPath || pstData.storeId || 'N/A';
                     document.getElementById('meta-gen-date').innerText = formatDate(pstData.generatedAt);
-
-                    document.getElementById('metric-total-emails').innerText = formatNum(pstData.globalStats.totalItems);
-                    document.getElementById('metric-total-size').innerText = pstData.globalStats.totalSizeHuman || '0 B';
-                    document.getElementById('metric-total-folders').innerText = formatNum(pstData.foldersCount);
                     document.getElementById('metric-file-size').innerText = pstData.pstSizeHuman || '0 B';
 
-                    // Clean existing charts if any
-                    Object.values(activeCharts).forEach(chart => chart.destroy());
-                    activeCharts = {};
+                    // Populate year dropdown
+                    populateYearSelector();
 
-                    // Step 2: Next frame - Lists & Directory Table
-                    setTimeout(() => {
-                        try {
-                            renderTopFolders();
-                            renderFoldersTable();
+                    // Centralized updater for metrics, charts, lists
+                    updateMetricsAndCharts();
 
-                            // Step 3: Next frame - Chart JS Initializations
-                            setTimeout(() => {
-                                try {
-                                    renderYearsCharts();
-                                    updateTimelineChart();
-                                    renderDonutChart();
-
-                                    // Complete transition: hide loading, show content
-                                    loadingContainer.classList.add('hidden');
-                                    dashboardContent.classList.remove('hidden');
-                                    lucide.createIcons();
-                                } catch (chartErr) {
-                                    console.error("Error rendering charts: ", chartErr);
-                                    loadingContainer.classList.add('hidden');
-                                    dashboardContent.classList.remove('hidden');
-                                }
-                            }, 50);
-
-                        } catch (listErr) {
-                            console.error("Error rendering lists/tables: ", listErr);
-                            loadingContainer.classList.add('hidden');
-                        }
-                    }, 50);
+                    // Complete transition: hide loading, show content
+                    loadingContainer.classList.add('hidden');
+                    dashboardContent.classList.remove('hidden');
+                    lucide.createIcons();
 
                 } catch (metaErr) {
                     console.error("Error setting metadata/metrics: ", metaErr);
                     loadingContainer.classList.add('hidden');
                 }
             }, 50);
+        }
+
+        // Update all metrics, lists and charts when selectedYear changes
+        function updateMetricsAndCharts() {
+            try {
+                // Step 1: Update Key Metrics
+                if (selectedYear === 'all') {
+                    document.getElementById('metric-total-emails').innerText = formatNum(pstData.globalStats.totalItems);
+                    document.getElementById('metric-total-size').innerText = pstData.globalStats.totalSizeHuman || '0 B';
+                    document.getElementById('metric-total-folders').innerText = formatNum(pstData.foldersCount);
+                } else {
+                    const yr = parseInt(selectedYear);
+                    const yearEntry = pstData.globalStats.yearBreakdown.find(y => y.year === yr);
+                    const count = yearEntry ? yearEntry.count : 0;
+                    const sizeBytes = yearEntry ? yearEntry.sizeBytes : 0;
+                    
+                    // Count folders with items in this year
+                    const foldersWithItems = pstData.folders.filter(f => {
+                        const fYr = f.yearBreakdown.find(y => y.year === yr);
+                        return fYr && fYr.count > 0;
+                    }).length;
+
+                    document.getElementById('metric-total-emails').innerText = formatNum(count);
+                    document.getElementById('metric-total-size').innerText = formatBytesHuman(sizeBytes);
+                    document.getElementById('metric-total-folders').innerText = formatNum(foldersWithItems);
+                }
+
+                // Clean existing charts if any
+                Object.values(activeCharts).forEach(chart => {
+                    if (chart && typeof chart.destroy === 'function') {
+                        chart.destroy();
+                    }
+                });
+                activeCharts = {};
+
+                // Step 2: Render lists & tables
+                renderTopFolders();
+                renderFoldersTable();
+
+                // Step 3: Render charts
+                renderYearsCharts();
+                updateTimelineChart();
+                renderDonutChart();
+
+                lucide.createIcons();
+            } catch (err) {
+                console.error("Error updating metrics and charts: ", err);
+            }
         }
 
         // Render Years charts
@@ -643,6 +731,9 @@
 
             // Chart Years Count
             const ctxCount = document.getElementById('chart-years-count').getContext('2d');
+            const countBgColors = labels.map(yr => yr.toString() === selectedYear ? '#f59e0b' : '#0ea0e6');
+            const countBorderColors = labels.map(yr => yr.toString() === selectedYear ? '#d97706' : '#0280c7');
+
             activeCharts.yearsCount = new Chart(ctxCount, {
                 type: 'bar',
                 data: {
@@ -650,8 +741,8 @@
                     datasets: [{
                         label: 'Correos electrónicos',
                         data: counts,
-                        backgroundColor: '#0ea0e6',
-                        borderColor: '#0280c7',
+                        backgroundColor: countBgColors,
+                        borderColor: countBorderColors,
                         borderWidth: 1,
                         borderRadius: 6
                     }]
@@ -671,6 +762,9 @@
 
             // Chart Years Size (MB)
             const ctxSize = document.getElementById('chart-years-size').getContext('2d');
+            const sizeBgColors = labels.map(yr => yr.toString() === selectedYear ? '#f59e0b' : '#6366f1');
+            const sizeBorderColors = labels.map(yr => yr.toString() === selectedYear ? '#d97706' : '#4f46e5');
+
             activeCharts.yearsSize = new Chart(ctxSize, {
                 type: 'bar',
                 data: {
@@ -678,8 +772,8 @@
                     datasets: [{
                         label: 'Tamaño (MB)',
                         data: sizesMB,
-                        backgroundColor: '#6366f1',
-                        borderColor: '#4f46e5',
+                        backgroundColor: sizeBgColors,
+                        borderColor: sizeBorderColors,
                         borderWidth: 1,
                         borderRadius: 6
                     }]
@@ -705,7 +799,12 @@
             }
 
             const metric = selectTimelineMetric.value;
-            const sortedMonths = [...pstData.globalStats.monthBreakdown].sort((a,b) => a.month.localeCompare(b.month));
+            let sortedMonths = [...pstData.globalStats.monthBreakdown].sort((a,b) => a.month.localeCompare(b.month));
+            
+            if (selectedYear !== 'all') {
+                sortedMonths = sortedMonths.filter(m => m.month.startsWith(selectedYear));
+            }
+            
             const labels = sortedMonths.map(item => item.month);
             
             let datasetLabel = '';
@@ -765,12 +864,30 @@
 
         // Render Donut Chart for major folders (percentage of total size)
         function renderDonutChart() {
-            const sortedBySize = [...pstData.folders].sort((a,b) => b.sizeBytes - a.sizeBytes);
+            let processedFolders = [];
+            
+            if (selectedYear === 'all') {
+                processedFolders = pstData.folders.map(f => ({
+                    path: f.path,
+                    sizeBytes: f.sizeBytes || 0
+                }));
+            } else {
+                const yr = parseInt(selectedYear);
+                processedFolders = pstData.folders.map(f => {
+                    const fYr = f.yearBreakdown.find(y => y.year === yr);
+                    return {
+                        path: f.path,
+                        sizeBytes: fYr ? (fYr.sizeBytes || 0) : 0
+                    };
+                }).filter(f => f.sizeBytes > 0);
+            }
+
+            const sortedBySize = [...processedFolders].sort((a,b) => b.sizeBytes - a.sizeBytes);
             const folders = sortedBySize.slice(0, 5);
             const otherSizeBytes = sortedBySize.slice(5).reduce((sum, f) => sum + (f.sizeBytes || 0), 0);
 
             const labels = folders.map(f => f.path);
-            const sizesMB = folders.map(f => ((f.sizeBytes || 0) / (1024 * 1024)).toFixed(2));
+            const sizesMB = folders.map(f => (f.sizeBytes / (1024 * 1024)).toFixed(2));
 
             if (otherSizeBytes > 0) {
                 labels.push('Otras');
@@ -821,8 +938,28 @@
 
         // Render Top folders lists
         function renderTopFolders() {
+            let processedFolders = [];
+            
+            if (selectedYear === 'all') {
+                processedFolders = pstData.folders.map(f => ({
+                    path: f.path,
+                    itemCount: f.itemCount,
+                    sizeHuman: f.sizeHuman || '0 B'
+                }));
+            } else {
+                const yr = parseInt(selectedYear);
+                processedFolders = pstData.folders.map(f => {
+                    const fYr = f.yearBreakdown.find(y => y.year === yr);
+                    return {
+                        path: f.path,
+                        itemCount: fYr ? fYr.count : 0,
+                        sizeHuman: fYr ? (fYr.sizeHuman || formatBytesHuman(fYr.sizeBytes)) : '0 B'
+                    };
+                }).filter(f => f.itemCount > 0);
+            }
+
             // Sort by Items
-            const byItems = [...pstData.folders]
+            const byItems = [...processedFolders]
                 .sort((a, b) => b.itemCount - a.itemCount)
                 .slice(0, 5);
 
@@ -833,7 +970,7 @@
                         <span class="text-xs font-bold text-slate-500 w-4">${idx + 1}</span>
                         <div class="min-w-0">
                             <p class="text-xs font-semibold text-slate-200 truncate" title="${f.path}">${f.path}</p>
-                            <p class="text-[10px] text-slate-400">${f.sizeHuman || '0 B'}</p>
+                            <p class="text-[10px] text-slate-400">${f.sizeHuman}</p>
                         </div>
                     </div>
                     <span class="text-xs font-bold bg-brand-500/10 text-brand-400 border border-brand-500/10 px-2 py-0.5 rounded-full shrink-0">${formatNum(f.itemCount)}</span>
@@ -841,7 +978,7 @@
             `).join('');
 
             // Sort by Size
-            const bySize = [...pstData.folders]
+            const bySize = [...processedFolders]
                 .sort((a, b) => b.sizeBytes - a.sizeBytes)
                 .slice(0, 5);
 
@@ -855,7 +992,7 @@
                             <p class="text-[10px] text-slate-400">${formatNum(f.itemCount)} correos</p>
                         </div>
                     </div>
-                    <span class="text-xs font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/10 px-2 py-0.5 rounded-full shrink-0">${f.sizeHuman || '0 B'}</span>
+                    <span class="text-xs font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/10 px-2 py-0.5 rounded-full shrink-0">${f.sizeHuman}</span>
                 </div>
             `).join('');
         }
@@ -865,9 +1002,57 @@
             const tableBody = document.getElementById('table-folders-body');
             const searchVal = inputFolderSearch.value.toLowerCase().trim();
 
-            const filteredFolders = pstData.folders.filter(f => 
+            let filteredFolders = [];
+            
+            if (selectedYear === 'all') {
+                filteredFolders = pstData.folders.map(f => ({
+                    path: f.path,
+                    itemCount: f.itemCount,
+                    sizeBytes: f.sizeBytes || 0,
+                    sizeHuman: f.sizeHuman || '0 B',
+                    oldestEmail: f.oldestEmail,
+                    newestEmail: f.newestEmail
+                }));
+            } else {
+                const yr = parseInt(selectedYear);
+                filteredFolders = pstData.folders.map(f => {
+                    const fYr = f.yearBreakdown.find(y => y.year === yr);
+                    return {
+                        path: f.path,
+                        itemCount: fYr ? fYr.count : 0,
+                        sizeBytes: fYr ? (fYr.sizeBytes || 0) : 0,
+                        sizeHuman: fYr ? (fYr.sizeHuman || formatBytesHuman(fYr.sizeBytes)) : '0 B',
+                        oldestEmail: fYr ? `${yr}-01-01` : null,
+                        newestEmail: fYr ? `${yr}-12-31` : null
+                    };
+                }).filter(f => f.itemCount > 0);
+            }
+
+            // Filter by search
+            filteredFolders = filteredFolders.filter(f => 
                 f.path.toLowerCase().includes(searchVal)
             );
+
+            // Sort filteredFolders
+            filteredFolders.sort((a, b) => {
+                let valA = a[sortField];
+                let valB = b[sortField];
+
+                // Handle undefined/nulls
+                if (valA === null || valA === undefined) return sortOrder === 'asc' ? 1 : -1;
+                if (valB === null || valB === undefined) return sortOrder === 'asc' ? -1 : 1;
+
+                if (typeof valA === 'string') {
+                    return sortOrder === 'asc' 
+                        ? valA.localeCompare(valB) 
+                        : valB.localeCompare(valA);
+                } else {
+                    return sortOrder === 'asc' ? valA - valB : valB - valA;
+                }
+            });
+
+            // Update Sort Icons UI
+            updateSortIcons();
 
             const totalFolders = filteredFolders.length;
             const maxPage = Math.ceil(totalFolders / pageSize) || 1;
@@ -904,8 +1089,8 @@
                     <td class="py-3 px-4 font-semibold text-slate-200 max-w-sm truncate" title="${f.path}">${f.path}</td>
                     <td class="py-3 px-4 text-right font-bold text-slate-300">${formatNum(f.itemCount)}</td>
                     <td class="py-3 px-4 text-right text-indigo-300 font-bold">${f.sizeHuman || '-'}</td>
-                    <td class="py-3 px-4 text-slate-400">${formatSimpleDate(f.oldestEmail)}</td>
-                    <td class="py-3 px-4 text-slate-400">${formatSimpleDate(f.newestEmail)}</td>
+                    <td class="py-3 px-4 text-slate-400">${selectedYear === 'all' ? formatSimpleDate(f.oldestEmail) : selectedYear}</td>
+                    <td class="py-3 px-4 text-slate-400">${selectedYear === 'all' ? formatSimpleDate(f.newestEmail) : selectedYear}</td>
                     <td class="py-3 px-4 text-center">
                         <button onclick="showFolderDetails('${encodeURIComponent(f.path)}')" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-800 text-slate-300 border border-slate-700/40 rounded transition-all inline-flex items-center gap-1 font-semibold">
                             <i data-lucide="eye" class="w-3.5 h-3.5 text-brand-400"></i> Ver Stats
@@ -915,6 +1100,36 @@
             `).join('');
 
             lucide.createIcons();
+        }
+
+        // Handle Table Sorting
+        function handleHeaderSort(field) {
+            if (sortField === field) {
+                sortOrder = sortOrder === 'asc' ? 'desc' : 'asc';
+            } else {
+                sortField = field;
+                sortOrder = 'desc'; // Default to descending on first click (common for lists)
+            }
+            renderFoldersTable();
+        }
+
+        // Update Sorting Icons via Lucide
+        function updateSortIcons() {
+            const fields = ['path', 'itemCount', 'sizeBytes', 'oldestEmail', 'newestEmail'];
+            fields.forEach(f => {
+                const el = document.getElementById(`sort-icon-${f}`);
+                if (!el) return;
+                
+                if (sortField === f) {
+                    el.setAttribute('data-lucide', sortOrder === 'asc' ? 'chevron-up' : 'chevron-down');
+                    el.classList.remove('text-slate-500');
+                    el.classList.add('text-brand-400');
+                } else {
+                    el.setAttribute('data-lucide', 'arrow-up-down');
+                    el.classList.remove('text-brand-400');
+                    el.classList.add('text-slate-500');
+                }
+            });
         }
 
         // Folder detailed modal trigger

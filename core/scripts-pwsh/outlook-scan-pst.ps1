@@ -9,10 +9,10 @@
 #>
 
 param (
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $true, ParameterSetName = "PathSet")]
     [string]$PstPath,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $true, ParameterSetName = "StoreSet")]
     [string]$StoreId,
 
     [Parameter(Mandatory = $false)]
@@ -900,6 +900,11 @@ function Build-ScanSummaryPayload {
         topFoldersBySize = if ($script:IncludeSizeRequested) { @($topFoldersBySize) } else { @() }
         folders = @($Folders)
     }
+}
+
+if ($PstPath -and $StoreId) {
+    Emit-ErrorPayload "No se puede usar -PstPath y -StoreId simultáneamente."
+    Exit-WithCleanup 1
 }
 
 if (-not $PstPath -and -not $StoreId) {

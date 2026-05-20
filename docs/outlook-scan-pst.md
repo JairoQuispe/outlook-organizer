@@ -9,7 +9,7 @@
 pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 [-PstPath <ruta>] [-StoreId <id>] [flags]
 ```
 
-- Provee `-PstPath` para montar un archivo PST o `-StoreId` para apuntar a un store ya montado.
+- Provee `-PstPath` para montar un archivo PST o `-StoreId` para apuntar a un store ya montado. Son mutuamente excluyentes (solo se permite usar uno de los dos).
 - El script intenta reusar sesiones de Outlook abiertas a menos que actives `-PreserveSession`.
 - Genera eventos `scanMeta`, `scanProgress` y una colección plana de carpetas (JSON) que consume la UI.
 
@@ -17,8 +17,8 @@ pwsh -ExecutionPolicy Bypass -File scripts-powershell/outlook-scan-pst.ps1 [-Pst
 
 | Flag | Tipo | Descripción |
 |------|------|-------------|
-| `-PstPath` | `string` | Ruta directa al PST que se montará para el escaneo. Si falta, debes pasar `-StoreId`.
-| `-StoreId` | `string` | Identificador de store existente (extraído con `outlook-list-stores.ps1`).
+| `-PstPath` | `string` | Ruta directa al PST que se montará para el escaneo. Mutuamente excluyente con `-StoreId`.
+| `-StoreId` | `string` | Identificador de store existente (extraído con `outlook-list-stores.ps1`). Mutuamente excluyente con `-PstPath`.
 | `-FilterOnlyYear` | `int` | Limita los ítems contados al año exacto; omite carpetas sin coincidencias para ese año.
 | `-IncludeSize` | `switch` | Calcula `sizeBytes`/`sizeHuman` usando la columna `Size` en la tabla MAPI (cuando está disponible) y lo añade por carpeta.
 | `-Summary` | `switch` | Genera al final un JSON único `type: "summary"` con inputs, fuentes, totales, year breakdown y tops (no repite el dump plano).
