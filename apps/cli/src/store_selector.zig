@@ -17,7 +17,7 @@ pub const SelectedStore = struct {
 
 /// Lists Outlook stores and lets the user pick a destination mailbox.
 /// Returns selected store id + display name. Caller owns both fields.
-pub fn selectTargetStore(allocator: std.mem.Allocator) !SelectedStore {
+pub fn selectTargetStore(allocator: std.mem.Allocator, profile_name: ?[]const u8) !SelectedStore {
     ui.clearScreen();
     ui.printSectionTitle("Buzon de destino");
     std.debug.print("  \x1b[90mObteniendo buzones de Outlook...\x1b[0m\n\n", .{});
@@ -26,9 +26,18 @@ pub fn selectTargetStore(allocator: std.mem.Allocator) !SelectedStore {
     const script_path = try ps_runner.writeEmbeddedScript(allocator, .list_stores);
     defer ps_runner.cleanupScript(allocator, script_path);
 
-    const output = ps_runner.runScript(allocator, script_path, &.{
-        "-Json",
-    }) catch {
+    var args = std.ArrayListUnmanaged([]const u8){};
+    defer args.deinit(allocator);
+
+    try args.append(allocator, "-Json");
+    if (profile_name) |p| {
+        if (p.len > 0) {
+            try args.append(allocator, "-ProfileName");
+            try args.append(allocator, p);
+        }
+    }
+
+    const output = ps_runner.runScript(allocator, script_path, args.items) catch {
         ui.printError("No se pudo ejecutar outlook-list-stores.ps1");
         return error.ScriptFailed;
     };
@@ -164,16 +173,21 @@ fn parseStoresJson(allocator: std.mem.Allocator, json_str: []const u8, stores: *
 
     // Find the opening bracket
     var pos = after_key;
-    while (pos < json_str.len and json_str[pos] != '[') : (pos += 1) {}
+    while (pos < json_str.len and json_str[pos] != '[' and json_str[pos] != '{') : (pos += 1) {}
     if (pos >= json_str.len) return;
-    pos += 1; // skip '['
+    
+    const is_array = json_str[pos] == '[';
+    if (is_array) {
+        pos += 1; // skip '['
+    }
 
     // Parse each store object
     while (pos < json_str.len) {
         // Skip whitespace and commas
         while (pos < json_str.len and (json_str[pos] == ' ' or json_str[pos] == ',' or json_str[pos] == '\t' or json_str[pos] == '\n' or json_str[pos] == '\r')) : (pos += 1) {}
 
-        if (pos >= json_str.len or json_str[pos] == ']') break;
+        if (pos >= json_str.len) break;
+        if (is_array and json_str[pos] == ']') break;
 
         if (json_str[pos] != '{') break;
 
@@ -232,6 +246,10 @@ fn parseStoresJson(allocator: std.mem.Allocator, json_str: []const u8, stores: *
             allocator.free(file_path);
             allocator.free(file_size);
             allocator.free(store_type);
+        }
+
+        if (!is_array) {
+            break;
         }
     }
 }

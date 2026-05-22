@@ -64,7 +64,10 @@ param (
 
     [Parameter(Mandatory=$false)]
     [ValidateRange(0, 100000)]
-    [int]$MaxFailureRecords = 1000
+    [int]$MaxFailureRecords = 1000,
+
+    [Parameter(Mandatory=$false)]
+    [string]$ProfileName
 )
 
 $ErrorActionPreference = "Stop"
@@ -355,7 +358,7 @@ if (-not [string]::IsNullOrWhiteSpace($FilterOnlyMonths)) {
         Exit-WithCleanup 1
     }
 
-    $FilterOnlyMonthNumbers = @($monthLookup.ToArray() | Sort-Object)
+    $FilterOnlyMonthNumbers = @(@($monthLookup) | Sort-Object)
     $script:FilterOnlyMonthLookup = $monthLookup
 }
 
@@ -582,14 +585,41 @@ function Get-OutlookNamespace {
         $outlook = $null
         $namespace = $null
 
+        $targetProfile = $ProfileName
+        if ([string]::IsNullOrWhiteSpace($targetProfile)) {
+            try {
+                $targetProfile = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook" -Name "DefaultProfile" -ErrorAction SilentlyContinue).DefaultProfile
+            } catch {}
+            if (-not $targetProfile) {
+                try {
+                    $targetProfile = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles" -Name "DefaultProfile" -ErrorAction SilentlyContinue).DefaultProfile
+                } catch {}
+            }
+            if (-not $targetProfile) { $targetProfile = "Outlook" }
+        }
+
         try {
             $outlook = [System.Runtime.InteropServices.Marshal]::GetActiveObject("Outlook.Application")
             $namespace = $outlook.GetNamespace("MAPI")
-            try { $namespace.Logon("", "", $false, $false) } catch {}
+            try { $namespace.Logon($ProfileName, "", $false, $false) } catch {
+                Emit-Log "warn" "Logon error: $($_.Exception.Message)"
+            }
         } catch {
             $outlook = New-Object -ComObject Outlook.Application
             $namespace = $outlook.GetNamespace("MAPI")
-            try { $namespace.Logon("", "", $false, $true) } catch {}
+            try { $namespace.Logon($ProfileName, "", $false, $true) } catch {
+                Emit-Log "warn" "Logon error: $($_.Exception.Message)"
+            }
+        }
+
+        try {
+            $currentProfile = $namespace.CurrentProfileName
+            if ($currentProfile -ine $targetProfile) {
+                Emit-ErrorPayload "Conflicto de perfil: Outlook esta abierto con el perfil '$currentProfile', pero se solicito '$targetProfile'. Por favor, cierra Outlook e intenta de nuevo."
+                Exit-WithCleanup 1
+            }
+        } catch {
+            Emit-Log "warn" "Failed to verify profile: $($_.Exception.Message)"
         }
 
         $script:OutlookApplication = $outlook

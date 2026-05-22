@@ -49,7 +49,10 @@ param (
 
     [Parameter(Mandatory = $false)]
     [Alias('ExportStadisticsPath')]
-    [string]$ExportStatisticsPath
+    [string]$ExportStatisticsPath,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ProfileName
 )
 
 # --- Initialization -----------------------------------------------------------
@@ -471,6 +474,19 @@ function Get-OutlookNamespace {
     $maxRetries = 3
     $retryDelay = 2
 
+    $targetProfile = $ProfileName
+    if ([string]::IsNullOrWhiteSpace($targetProfile)) {
+        try {
+            $targetProfile = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook" -Name "DefaultProfile" -ErrorAction SilentlyContinue).DefaultProfile
+        } catch {}
+        if (-not $targetProfile) {
+            try {
+                $targetProfile = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles" -Name "DefaultProfile" -ErrorAction SilentlyContinue).DefaultProfile
+            } catch {}
+        }
+        if (-not $targetProfile) { $targetProfile = "Outlook" }
+    }
+
     if (-not $script:PreserveSessionRequested) {
         try {
             $outlookProbe = New-Object -ComObject $progId -ErrorAction Stop
@@ -490,16 +506,14 @@ function Get-OutlookNamespace {
             try {
                 $outlook = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
                 $namespace = $outlook.GetNamespace("MAPI")
-                if (-not $script:PreserveSessionRequested) {
-                    try { $namespace.Logon("", "", $false, $false) } catch {}
-                }
+                try { $namespace.Logon($ProfileName, "", $false, $false) } catch {}
             } catch {
                 if ($script:PreserveSessionRequested) {
                     throw "Outlook debe estar abierto para usar -PreserveSession."
                 }
                 $outlook = New-Object -ComObject Outlook.Application
                 $namespace = $outlook.GetNamespace("MAPI")
-                try { $namespace.Logon("", "", $false, $true) } catch {}
+                try { $namespace.Logon($ProfileName, "", $false, $true) } catch {}
                 $script:CreatedOutlook = $true
                 if (-not $script:CreatedOutlookPid) {
                     try {
@@ -513,6 +527,16 @@ function Get-OutlookNamespace {
 
             if (-not $namespace) {
                 throw "No se pudo obtener el Namespace MAPI de Outlook."
+            }
+
+            try {
+                $currentProfile = $namespace.CurrentProfileName
+                if ($currentProfile -ine $targetProfile) {
+                    Emit-ErrorPayload "Conflicto de perfil: Outlook esta abierto con el perfil '$currentProfile', pero se solicito '$targetProfile'. Por favor, cierra Outlook e intenta de nuevo."
+                    Exit-WithCleanup 1
+                }
+            } catch {
+                Emit-Log "warn" "Failed to verify profile: $($_.Exception.Message)"
             }
 
             $script:OutlookApplication = $outlook

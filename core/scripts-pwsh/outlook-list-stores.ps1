@@ -8,7 +8,9 @@ param (
     [string]$StoreType,
     [Parameter(Mandatory=$false)]
     [ValidateSet('None','Json','Text')]
-    [string]$ExportResult = 'None'
+    [string]$ExportResult = 'None',
+    [Parameter(Mandatory=$false)]
+    [string]$ProfileName
 )
 
 function Format-StoreBytes {
@@ -143,6 +145,19 @@ if ($MyInvocation.InvocationName -ne ".") {
         $retryDelay = 2
         $progId = "Outlook.Application"
 
+        $targetProfile = $ProfileName
+        if ([string]::IsNullOrWhiteSpace($targetProfile)) {
+            try {
+                $targetProfile = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook" -Name "DefaultProfile" -ErrorAction SilentlyContinue).DefaultProfile
+            } catch {}
+            if (-not $targetProfile) {
+                try {
+                    $targetProfile = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles" -Name "DefaultProfile" -ErrorAction SilentlyContinue).DefaultProfile
+                } catch {}
+            }
+            if (-not $targetProfile) { $targetProfile = "Outlook" }
+        }
+
         if (-not $PreserveSession) {
             try {
                 $outlookProbe = New-Object -ComObject $progId -ErrorAction Stop
@@ -159,16 +174,14 @@ if ($MyInvocation.InvocationName -ne ".") {
                 try {
                     $outlook = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
                     $namespace = $outlook.GetNamespace("MAPI")
-                    if (-not $PreserveSession) {
-                        try { $namespace.Logon("", "", $false, $false) } catch {}
-                    }
+                    try { $namespace.Logon($ProfileName, "", $false, $false) } catch {}
                 } catch {
                     if ($PreserveSession) {
                         throw "Outlook debe estar abierto para usar -PreserveSession."
                     }
                     $outlook = New-Object -ComObject Outlook.Application
                     $namespace = $outlook.GetNamespace("MAPI")
-                    try { $namespace.Logon("", "", $false, $true) } catch {}
+                    try { $namespace.Logon($ProfileName, "", $false, $true) } catch {}
                     $createdOutlook = $true
                     if (-not $createdOutlookPid) {
                         try {
@@ -183,6 +196,16 @@ if ($MyInvocation.InvocationName -ne ".") {
                 if (-not $namespace) {
                     throw "No se pudo obtener el Namespace MAPI de Outlook."
                 }
+
+                try {
+                    $currentProfile = $namespace.CurrentProfileName
+                    if ($currentProfile -ine $targetProfile) {
+                        throw "Conflicto de perfil: Outlook esta abierto con el perfil '$currentProfile', pero se solicito '$targetProfile'. Por favor, cierra Outlook e intenta de nuevo."
+                    }
+                } catch {
+                    if ($_.Exception.Message -like "*Conflicto de perfil*") { throw }
+                }
+
                 break
             } catch {
                 $errorCode = $_.Exception.HResult
@@ -220,7 +243,7 @@ if ($MyInvocation.InvocationName -ne ".") {
         if ($shouldEmitJsonConsole -or $shouldExportJson) {
             $payload = [pscustomobject]@{
                 type = "stores"
-                stores = $stores
+                stores = @($stores)
             }
             $jsonOutput = $payload | ConvertTo-Json -Compress -Depth 6
             if ($shouldEmitJsonConsole) {

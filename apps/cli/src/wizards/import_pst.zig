@@ -63,7 +63,87 @@ const ImportConfig = struct {
     filter_months: ?[]const u8,
     folder_plan_path: []const u8,
     adaptive_throttling: bool,
+    profile_name: ?[]const u8,
 };
+
+fn chooseOutlookProfile(allocator: std.mem.Allocator) ![]const u8 {
+    var cursor: usize = 0;
+    const labels = [_][]const u8{
+        "Usar perfil predeterminado (\"Outlook\")",
+        "Especificar nombre del perfil",
+    };
+
+    while (true) {
+        ui.clearScreen();
+        ui.printSectionTitle("Seleccionar perfil de Outlook");
+        std.debug.print("  \x1b[90mSelecciona el perfil de Outlook que deseas usar para esta importacion.\x1b[0m\n", .{});
+        std.debug.print("  \x1b[90m\xe2\x86\x91/\xe2\x86\x93 mover | Enter confirmar\x1b[0m\n\n", .{});
+
+        for (labels, 0..) |label, idx| {
+            const is_current = idx == cursor;
+            if (is_current) std.debug.print("  \x1b[7m", .{});
+            std.debug.print("  {s}\n", .{label});
+            if (is_current) std.debug.print("  \x1b[0m", .{});
+        }
+
+        const key = ui.readSingleKey() catch continue;
+        switch (key) {
+            'w', 'W', 'k', 'K' => {
+                if (cursor > 0) cursor -= 1;
+            },
+            's', 'S', 'j', 'J' => {
+                if (cursor + 1 < labels.len) cursor += 1;
+            },
+            '\r', '\n' => {
+                if (cursor == 0) {
+                    return try allocator.dupe(u8, "Outlook");
+                }
+
+                while (true) {
+                    ui.clearScreen();
+                    ui.printSectionTitle("Especificar perfil de Outlook");
+                    std.debug.print("  \x1b[90mEscribe el nombre del perfil de Outlook que deseas usar.\x1b[0m\n\n", .{});
+                    std.debug.print("  \x1b[33mNombre del perfil:\x1b[0m ", .{});
+
+                    const input = ui.readLine(allocator) catch continue;
+                    if (input.len == 0) {
+                        allocator.free(input);
+                        continue;
+                    }
+                    return input;
+                }
+            },
+            27 => {
+                const seq1 = ui.readSingleKey() catch continue;
+                if (seq1 != '[' and seq1 != 'O') continue;
+
+                const seq2 = ui.readSingleKey() catch continue;
+                switch (seq2) {
+                    'A' => {
+                        if (cursor > 0) cursor -= 1;
+                    },
+                    'B' => {
+                        if (cursor + 1 < labels.len) cursor += 1;
+                    },
+                    else => {},
+                }
+            },
+            0, 224 => {
+                const ext = ui.readSingleKey() catch continue;
+                switch (ext) {
+                    72 => {
+                        if (cursor > 0) cursor -= 1;
+                    },
+                    80 => {
+                        if (cursor + 1 < labels.len) cursor += 1;
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
+}
 
 pub fn run(allocator: std.mem.Allocator) !void {
     // Step 1: Select PST file
@@ -79,15 +159,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
     };
     defer allocator.free(pst_path);
 
-    // Step 2: Select target store
-    const selected_store = store_selector.selectTargetStore(allocator) catch {
-        ui.printError("Error seleccionando buzon destino");
-        ui.waitForEnter();
-        return;
-    };
-    defer allocator.free(selected_store.store_id);
-    defer allocator.free(selected_store.display_name);
-
     // Step 3: Scan PST and choose folders
     const scan_mode = chooseScanMode(allocator) catch {
         ui.printError("Error leyendo modo de escaneo");
@@ -102,7 +173,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     };
     defer if (scan_filter_year) |y| allocator.free(y);
 
-    const folder_selection = runScanAndSelectFolders(allocator, pst_path, scan_mode, scan_filter_year) catch |err| {
+    const folder_selection = runScanAndSelectFolders(allocator, pst_path, scan_mode, scan_filter_year, null) catch |err| {
         if (err == error.Cancelled) {
             std.debug.print("\n  \x1b[90mOperacion cancelada.\x1b[0m\n", .{});
             ui.waitForEnter();
@@ -185,6 +256,22 @@ pub fn run(allocator: std.mem.Allocator) !void {
     std.debug.print("  \x1b[33mActivar throttling adaptativo? (S/n) [S]:\x1b[0m ", .{});
     const adaptive_throttling = ui.readYesNo(true);
 
+    const profile_name = chooseOutlookProfile(allocator) catch {
+        ui.printError("Error seleccionando perfil de Outlook");
+        ui.waitForEnter();
+        return;
+    };
+    defer allocator.free(profile_name);
+
+    // Step 2: Select target store
+    const selected_store = store_selector.selectTargetStore(allocator, profile_name) catch {
+        ui.printError("Error seleccionando buzon destino");
+        ui.waitForEnter();
+        return;
+    };
+    defer allocator.free(selected_store.store_id);
+    defer allocator.free(selected_store.display_name);
+
     // Build config
     const config = ImportConfig{
         .pst_path = pst_path,
@@ -197,12 +284,16 @@ pub fn run(allocator: std.mem.Allocator) !void {
         .filter_months = filter_months,
         .folder_plan_path = folder_selection.folder_plan_path,
         .adaptive_throttling = adaptive_throttling,
+        .profile_name = profile_name,
     };
 
     // Show summary and confirm
     ui.clearScreen();
     ui.printSectionTitle("Resumen de importacion");
     std.debug.print("  \x1b[1;37mArchivo PST:\x1b[0m   {s}\n", .{config.pst_path});
+    if (config.profile_name) |p| {
+        std.debug.print("  \x1b[1;37mPerfil Outlook:\x1b[0m {s}\n", .{p});
+    }
     std.debug.print("  \x1b[1;37mBuzon destino:\x1b[0m {s}\n", .{config.target_store_name});
     std.debug.print("  \x1b[1;37mAccion:\x1b[0m        {s}\n", .{config.action});
     std.debug.print("  \x1b[1;37mEscaneo:\x1b[0m       {s}\n", .{if (folder_selection.scan_mode == .deep) "Profundo" else "Rapido"});
@@ -252,28 +343,33 @@ fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
         }
     }
 
-    const processed = state.copied + state.moved + state.skipped + state.failed;
-    var total_estimated = processed;
+    const processed = state.copied + state.moved;
+    const total_script_processed = state.copied + state.moved + state.skipped + state.failed;
+    var total_estimated = total_script_processed;
     if (state.percent > 0) {
-        total_estimated = @divTrunc(processed * 100, @as(i64, @intCast(state.percent)));
-        if (total_estimated < processed) total_estimated = processed;
+        total_estimated = @divTrunc(total_script_processed * 100, @as(i64, @intCast(state.percent)));
+        if (total_estimated < total_script_processed) total_estimated = total_script_processed;
     }
-    const remaining = @max(total_estimated - processed, 0);
+    const remaining = @max(total_estimated - total_script_processed, 0);
     const elapsed_ms = std.time.milliTimestamp() - state.start_ms;
 
     if (state.has_rendered_progress) {
-        std.debug.print("\x1b[1F", .{});
+        std.debug.print("\x1b[2F", .{});
     } else {
         state.has_rendered_progress = true;
     }
+
+    const current_status = extractString(line, "status") orelse "";
+    std.debug.print("\r\x1b[2K  \x1b[90mCarpeta:\x1b[0m {s}\n", .{current_status});
 
     ui.printProgressBar(state.percent, "Importando");
 
     const elapsed_sec = @divTrunc(elapsed_ms, 1000);
     const elapsed_parts = ui.secondsToHms(elapsed_sec);
 
-    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m {d} \x1b[90m| Restantes(est):\x1b[0m {d} \x1b[90m| Transcurrido:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
+    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m {d} \x1b[90m| Omitidos:\x1b[0m {d} \x1b[90m| Restantes(est):\x1b[0m {d} \x1b[90m| Transcurrido:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
         processed,
+        state.skipped,
         remaining,
         elapsed_parts.hours,
         elapsed_parts.minutes,
@@ -507,7 +603,7 @@ fn chooseScanYearFilter(allocator: std.mem.Allocator) !?[]u8 {
     }
 }
 
-fn runScanAndSelectFolders(allocator: std.mem.Allocator, pst_path: []const u8, scan_mode: ScanMode, scan_filter_year: ?[]const u8) !FolderSelectionResult {
+fn runScanAndSelectFolders(allocator: std.mem.Allocator, pst_path: []const u8, scan_mode: ScanMode, scan_filter_year: ?[]const u8, profile_name: ?[]const u8) !FolderSelectionResult {
     ui.clearScreen();
     ui.printSectionTitle("Escanear PST");
     std.debug.print("  \x1b[90mEjecutando escaneo {s}...\x1b[0m\n", .{if (scan_mode == .deep) "profundo" else "rapido"});
@@ -536,6 +632,12 @@ fn runScanAndSelectFolders(allocator: std.mem.Allocator, pst_path: []const u8, s
     if (scan_filter_year) |y| {
         try args.append(allocator, "-FilterOnlyYear");
         try args.append(allocator, y);
+    }
+    if (profile_name) |p| {
+        if (p.len > 0) {
+            try args.append(allocator, "-ProfileName");
+            try args.append(allocator, p);
+        }
     }
 
     const output = ps_runner.runScript(allocator, scan_script_path, args.items) catch return error.ScanFailed;
@@ -994,6 +1096,12 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     if (config.adaptive_throttling) {
         try args.append(allocator, "-AdaptiveThrottling");
     }
+    if (config.profile_name) |p| {
+        if (p.len > 0) {
+            try args.append(allocator, "-ProfileName");
+            try args.append(allocator, p);
+        }
+    }
 
     std.debug.print("  \x1b[90mEjecutando script de importacion...\x1b[0m\n\n", .{});
     const start_time = std.time.milliTimestamp();
@@ -1061,7 +1169,11 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     }
 
     if (result_line == null and last_copied == 0 and last_moved == 0 and last_skipped == 0 and last_failed == 0) {
-        ui.printError("La importacion no devolvio resultado final (restoreResult). Revisa logs del script para diagnostico.");
+        ui.printError("La importacion no devolvio resultado final (restoreResult).");
+        if (output.len > 0) {
+            std.debug.print("\n  \x1b[91mSalida/Error del script:\x1b[0m\n", .{});
+            std.debug.print("  {s}\n", .{output});
+        }
         ui.waitForEnter();
         return;
     }
