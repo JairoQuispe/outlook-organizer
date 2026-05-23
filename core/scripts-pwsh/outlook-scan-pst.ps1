@@ -467,6 +467,25 @@ function Exit-WithCleanup {
     exit $Code
 }
 
+function Get-OutlookExePath {
+    $paths = @(
+        "${env:ProgramFiles}\Microsoft Office\root\Office16\OUTLOOK.EXE",
+        "${env:ProgramFiles}\Microsoft Office\root\Office15\OUTLOOK.EXE",
+        "${env:ProgramFiles}\Microsoft Office\Office16\OUTLOOK.EXE",
+        "${env:ProgramFiles}\Microsoft Office\Office15\OUTLOOK.EXE",
+        "${env:ProgramFiles(x86)}\Microsoft Office\Office16\OUTLOOK.EXE",
+        "${env:ProgramFiles(x86)}\Microsoft Office\Office15\OUTLOOK.EXE",
+        "OUTLOOK.EXE"
+    )
+    foreach ($p in $paths) {
+        try {
+            $cmd = Get-Command $p -ErrorAction Stop
+            if ($cmd) { return $cmd.Source }
+        } catch {}
+    }
+    return "OUTLOOK.EXE"
+}
+
 function Get-OutlookNamespace {
     if ($script:MainNamespace -and $script:OutlookApplication) { return $script:MainNamespace }
 
@@ -532,8 +551,47 @@ function Get-OutlookNamespace {
             try {
                 $currentProfile = $namespace.CurrentProfileName
                 if ($currentProfile -ine $targetProfile) {
-                    Emit-ErrorPayload "Conflicto de perfil: Outlook esta abierto con el perfil '$currentProfile', pero se solicito '$targetProfile'. Por favor, cierra Outlook e intenta de nuevo."
-                    Exit-WithCleanup 1
+                    Emit-Log "warn" "Perfil actual '$currentProfile' != solicitado '$targetProfile'. Reiniciando Outlook con el perfil '$targetProfile'..."
+
+                    Release-ComObjectSafe $namespace
+                    Release-ComObjectSafe $outlook
+                    $outlook = $null
+                    $namespace = $null
+
+                    $outlookPath = Get-OutlookExePath
+                    Start-Process -FilePath $outlookPath -ArgumentList "/recycle", "/profile", "`"$targetProfile`"" -WindowStyle Hidden
+
+                    $maxWait = 45
+                    $waited = 0
+                    while ($waited -lt $maxWait) {
+                        Start-Sleep -Seconds 1
+                        $waited++
+                        try {
+                            $outlook = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
+                            $namespace = $outlook.GetNamespace("MAPI")
+                            try { $namespace.Logon($ProfileName, "", $false, $false) } catch {}
+                            $newProfile = $namespace.CurrentProfileName
+                            if ($newProfile -ine $targetProfile) {
+                                Release-ComObjectSafe $namespace
+                                Release-ComObjectSafe $outlook
+                                $outlook = $null
+                                $namespace = $null
+                                continue
+                            }
+                            break
+                        } catch {
+                            $outlook = $null
+                            $namespace = $null
+                        }
+                    }
+
+                    if (-not $outlook -or -not $namespace) {
+                        Emit-ErrorPayload "No se pudo reiniciar Outlook con el perfil '$targetProfile'. Por favor, cierra Outlook manualmente e intenta de nuevo."
+                        Exit-WithCleanup 1
+                    }
+
+                    $script:CreatedOutlook = $true
+                    Emit-Log "info" "Outlook reiniciado exitosamente con el perfil '$targetProfile'"
                 }
             } catch {
                 Emit-Log "warn" "Failed to verify profile: $($_.Exception.Message)"
