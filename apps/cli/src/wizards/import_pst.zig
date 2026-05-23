@@ -15,6 +15,7 @@ const ImportProgressState = struct {
     moved: i64,
     skipped: i64,
     failed: i64,
+    size_bytes: i64,
     percent: u32,
     has_rendered_progress: bool,
 };
@@ -56,6 +57,7 @@ const ImportConfig = struct {
     pst_path: []const u8,
     target_store_id: []const u8,
     target_store_name: []const u8,
+    target_store_type: []const u8,
     action: []const u8,
     skip_duplicates: bool,
     deep_duplicate_check: bool,
@@ -271,12 +273,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
     };
     defer allocator.free(selected_store.store_id);
     defer allocator.free(selected_store.display_name);
+    defer allocator.free(selected_store.store_type);
 
     // Build config
     const config = ImportConfig{
         .pst_path = pst_path,
         .target_store_id = selected_store.store_id,
         .target_store_name = selected_store.display_name,
+        .target_store_type = selected_store.store_type,
         .action = action,
         .skip_duplicates = skip_duplicates,
         .deep_duplicate_check = deep_duplicate_check,
@@ -295,6 +299,17 @@ pub fn run(allocator: std.mem.Allocator) !void {
         std.debug.print("  \x1b[1;37mPerfil Outlook:\x1b[0m {s}\n", .{p});
     }
     std.debug.print("  \x1b[1;37mBuzon destino:\x1b[0m {s}\n", .{config.target_store_name});
+    var store_type_friendly: []const u8 = "Desconocido";
+    if (std.mem.eql(u8, config.target_store_type, "ExchangeOnline")) {
+        store_type_friendly = "Exchange Online";
+    } else if (std.mem.eql(u8, config.target_store_type, "OST")) {
+        store_type_friendly = "OST";
+    } else if (std.mem.eql(u8, config.target_store_type, "PST")) {
+        store_type_friendly = "PST";
+    } else if (config.target_store_type.len > 0) {
+        store_type_friendly = config.target_store_type;
+    }
+    std.debug.print("  \x1b[1;37mTipo de buzon:\x1b[0m {s}\n", .{store_type_friendly});
     std.debug.print("  \x1b[1;37mAccion:\x1b[0m        {s}\n", .{config.action});
     std.debug.print("  \x1b[1;37mEscaneo:\x1b[0m       {s}\n", .{if (folder_selection.scan_mode == .deep) "Profundo" else "Rapido"});
     std.debug.print("  \x1b[1;37mCarpetas:\x1b[0m      {d}/{d} seleccionadas\n", .{ folder_selection.selected_count, folder_selection.total_count });
@@ -333,6 +348,7 @@ fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
     if (extractNumber(line, "moved")) |v| state.moved = v;
     if (extractNumber(line, "skipped")) |v| state.skipped = v;
     if (extractNumber(line, "failed")) |v| state.failed = v;
+    if (extractNumber(line, "sizeBytes")) |v| state.size_bytes = v;
     if (extractNumber(line, "percent")) |v| {
         if (v <= 0) {
             state.percent = 0;
@@ -367,8 +383,21 @@ fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
     const elapsed_sec = @divTrunc(elapsed_ms, 1000);
     const elapsed_parts = ui.secondsToHms(elapsed_sec);
 
-    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m {d} \x1b[90m| Omitidos:\x1b[0m {d} \x1b[90m| Restantes(est):\x1b[0m {d} \x1b[90m| Transcurrido:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
+    var size_buf: [32]u8 = undefined;
+    var size_str: []const u8 = "0 Bytes";
+    if (state.size_bytes > 0) {
+        const size_gb = @as(f64, @floatFromInt(state.size_bytes)) / (1024.0 * 1024.0 * 1024.0);
+        if (size_gb >= 0.1) {
+            size_str = std.fmt.bufPrint(&size_buf, "{d:.2} GB", .{size_gb}) catch "Error";
+        } else {
+            const size_mb = @as(f64, @floatFromInt(state.size_bytes)) / (1024.0 * 1024.0);
+            size_str = std.fmt.bufPrint(&size_buf, "{d:.2} MB", .{size_mb}) catch "Error";
+        }
+    }
+
+    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m {d} ({s}) \x1b[90m| Omitidos:\x1b[0m {d} \x1b[90m| Restantes(est):\x1b[0m {d} \x1b[90m| Transcurrido:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
         processed,
+        size_str,
         state.skipped,
         remaining,
         elapsed_parts.hours,
@@ -1079,10 +1108,51 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
         }
     }
 
+    // Get start date and time
+    const SYSTEMTIME = extern struct {
+        wYear: u16,
+        wMonth: u16,
+        wDayOfWeek: u16,
+        wDay: u16,
+        wHour: u16,
+        wMinute: u16,
+        wSecond: u16,
+        wMilliseconds: u16,
+    };
+    const kernel32 = struct {
+        extern "kernel32" fn GetLocalTime(lpSystemTime: *SYSTEMTIME) void;
+    };
+    var start_sys_time: SYSTEMTIME = undefined;
+    kernel32.GetLocalTime(&start_sys_time);
+
+    var date_time_buf: [64]u8 = undefined;
+    const date_time_str = std.fmt.bufPrint(&date_time_buf, "{0d:0>2}/{1d:0>2}/{2d:0>4} {3d:0>2}:{4d:0>2}:{5d:0>2}", .{
+        start_sys_time.wDay,
+        start_sys_time.wMonth,
+        start_sys_time.wYear,
+        start_sys_time.wHour,
+        start_sys_time.wMinute,
+        start_sys_time.wSecond,
+    }) catch "Desconocida";
+
     // Mostrar el resumen general de los parámetros de importación
     std.debug.print("  \x1b[1;30m======================================================================\x1b[0m\n", .{});
     std.debug.print("  \x1b[1;37mPST de origen:\x1b[0m     {s} ({s})\n", .{ config.pst_path, size_str });
     std.debug.print("  \x1b[1;37mBuzon de destino:\x1b[0m  {s}\n", .{config.target_store_name});
+
+    var store_type_friendly: []const u8 = "Desconocido";
+    if (std.mem.eql(u8, config.target_store_type, "ExchangeOnline")) {
+        store_type_friendly = "Exchange Online";
+    } else if (std.mem.eql(u8, config.target_store_type, "OST")) {
+        store_type_friendly = "OST";
+    } else if (std.mem.eql(u8, config.target_store_type, "PST")) {
+        store_type_friendly = "PST";
+    } else if (config.target_store_type.len > 0) {
+        store_type_friendly = config.target_store_type;
+    }
+    std.debug.print("  \x1b[1;37mTipo de buzon:\x1b[0m     {s}\n", .{store_type_friendly});
+    std.debug.print("  \x1b[1;37mInicio proceso:\x1b[0m    {s}\n", .{date_time_str});
+
     if (config.filter_year) |y| {
         std.debug.print("  \x1b[1;37mFiltro de anios:\x1b[0m  {s}\n", .{y});
     } else {
@@ -1143,6 +1213,7 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
         .moved = 0,
         .skipped = 0,
         .failed = 0,
+        .size_bytes = 0,
         .percent = 0,
         .has_rendered_progress = false,
     };
@@ -1189,9 +1260,9 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     }
 
     if (error_message) |msg| {
-       ui.printError(msg);
+        ui.printError(msg);
         ui.waitForEnter();
-       return;
+        return;
     }
 
     if (result_line == null and output.len == 0) {
@@ -1201,13 +1272,13 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     }
 
     if (result_line == null and last_copied == 0 and last_moved == 0 and last_skipped == 0 and last_failed == 0) {
-       ui.printError("La importacion no devolvio resultado final (restoreResult).");
+        ui.printError("La importacion no devolvio resultado final (restoreResult).");
         if (output.len > 0) {
             std.debug.print("\n  \x1b[91mSalida/Error del script:\x1b[0m\n", .{});
             std.debug.print("  {s}\n", .{output});
         }
         ui.waitForEnter();
-       return;
+        return;
     }
 
     // Show final results

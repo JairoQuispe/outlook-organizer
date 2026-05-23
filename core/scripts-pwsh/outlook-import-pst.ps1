@@ -86,7 +86,8 @@ function Publish-Progress {
         [int]$Copied,
         [int]$Moved,
         [int]$Skipped,
-        [int]$Failed
+        [int]$Failed,
+        [long]$SizeBytes = 0
     )
 
     if ($script:IsHeadlessOutput) {
@@ -100,10 +101,11 @@ function Publish-Progress {
             moved = $Moved
             skipped = $Skipped
             failed = $Failed
+            sizeBytes = $SizeBytes
         }
         [Console]::WriteLine(($payload | ConvertTo-Json -Compress -Depth 6))
     } else {
-        $statusMessage = "$Status | Copiados=$Copied Movidos=$Moved Omitidos=$Skipped Fallidos=$Failed"
+        $statusMessage = "$Status | Copiados=$Copied Movidos=$Moved Omitidos=$Skipped Fallidos=$Failed Size=$(Format-StoreBytes $SizeBytes)"
         if ($Completed) {
             Microsoft.PowerShell.Utility\Write-Progress -Activity $Activity -Status $statusMessage -PercentComplete 100 -Completed
         } else {
@@ -212,6 +214,25 @@ function Emit-ErrorPayload {
         [Console]::WriteLine(($payload | ConvertTo-Json -Compress -Depth 6))
     } else {
         Write-Error $Message -ErrorAction Continue
+    }
+}
+
+function Invoke-ItemSkipped {
+    param(
+        [ref]$stats,
+        [string]$folderPath
+    )
+    $stats.Value.skipped++
+    $stats.Value.processed++
+    
+    if ($stats.Value.processed % 100 -eq 0 -or $stats.Value.processed -eq $stats.Value.total) {
+        $pct = 0
+        if ($stats.Value.total -gt 0) {
+            $pct = [int][Math]::Round(($stats.Value.processed / $stats.Value.total) * 100)
+            if ($pct -gt 99 -and $stats.Value.processed -lt $stats.Value.total) { $pct = 99 }
+            if ($pct -eq 0 -and $stats.Value.processed -gt 0) { $pct = 1 }
+        }
+        Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "$folderPath ($($stats.Value.processed)/$($stats.Value.total))" -PercentComplete $pct -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed -SizeBytes $stats.Value.sizeBytes
     }
 }
 
@@ -1523,7 +1544,7 @@ function Restore-FolderRecursive {
                             try { $itemDate = $item.CreationTime } catch {}
                         }
                         if (-not $itemDate -or $itemDate.Year -ne $script:FilterOnlyYear) {
-                            $stats.Value.skipped++
+                            Invoke-ItemSkipped -stats $stats -folderPath $folderPath
                             continue
                         }
                     }
@@ -1544,7 +1565,7 @@ function Restore-FolderRecursive {
                             try { $monthMatches = $script:FilterOnlyMonthLookup.Contains($monthValue) } catch { $monthMatches = $false }
                         }
                         if (-not $itemDate -or -not $monthMatches) {
-                            $stats.Value.skipped++
+                            Invoke-ItemSkipped -stats $stats -folderPath $folderPath
                             continue
                         }
                     }
@@ -1563,7 +1584,7 @@ function Restore-FolderRecursive {
                                 $dupSource = "batch"
                             }
                             if ($isDup) {
-                                $stats.Value.skipped++
+                                Invoke-ItemSkipped -stats $stats -folderPath $folderPath
                                 $dupPayload = @{
                                     type = "dupSkipped"
                                     folder = $folderPath
@@ -1613,6 +1634,7 @@ function Restore-FolderRecursive {
                             }
                         }
                         if ($Action -ieq "Move") { $stats.Value.moved++ } else { $stats.Value.copied++ }
+                        $stats.Value.sizeBytes = [long]$stats.Value.sizeBytes + $itemSize
                         if ($script:AdaptiveThrottling -and $script:TokenBucket.adaptiveMultiplier -lt 1.0) {
                             $script:TokenBucket.successStreak++
                             if ($script:TokenBucket.successStreak -ge $script:TokenBucket.recoveryInterval) {
@@ -1649,7 +1671,7 @@ function Restore-FolderRecursive {
                         if ($pct -gt 99 -and $stats.Value.processed -lt $stats.Value.total) { $pct = 99 }
                         if ($pct -eq 0 -and $stats.Value.processed -gt 0) { $pct = 1 }
                     }
-                    Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "$folderPath ($($stats.Value.processed)/$($stats.Value.total))" -PercentComplete $pct -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed
+                    Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "$folderPath ($($stats.Value.processed)/$($stats.Value.total))" -PercentComplete $pct -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed -SizeBytes $stats.Value.sizeBytes
 
                     Emit-ThrottleStats
                 } finally {
@@ -1831,6 +1853,7 @@ $stats = [ref]@{
     total = [int]$totalItems.Value
     failures = @()
     failureOverflow = 0
+    sizeBytes = [long]0
 }
 
 $startTime = [DateTime]::UtcNow
@@ -1850,7 +1873,7 @@ if ($usingFolderPlan) {
     }
 }
 
-Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "Completado" -PercentComplete 100 -Completed -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed
+Publish-Progress -Activity "Restauracion PST -> Buzon" -Status "Completado" -PercentComplete 100 -Completed -Copied $stats.Value.copied -Moved $stats.Value.moved -Skipped $stats.Value.skipped -Failed $stats.Value.failed -SizeBytes $stats.Value.sizeBytes
 Emit-ThrottleStats -Force
 
 if (-not $alreadyMounted) {
@@ -1868,6 +1891,7 @@ $payload = @{
     moved = [int]$stats.Value.moved
     skipped = [int]$stats.Value.skipped
     failed = [int]$stats.Value.failed
+    sizeBytes = [long]$stats.Value.sizeBytes
     elapsedMs = $elapsed
     throttleEvents = [int]$script:TokenBucket.throttleErrors
     totalWaitedMs = [long]$script:TokenBucket.totalWaitedMs

@@ -13,6 +13,7 @@ pub const StoreInfo = struct {
 pub const SelectedStore = struct {
     display_name: []u8,
     store_id: []u8,
+    store_type: []u8,
 };
 
 /// Lists Outlook stores and lets the user pick a destination mailbox.
@@ -159,6 +160,7 @@ pub fn selectTargetStore(allocator: std.mem.Allocator, profile_name: ?[]const u8
     return .{
         .display_name = try allocator.dupe(u8, selected.display_name),
         .store_id = try allocator.dupe(u8, selected.store_id),
+        .store_type = try allocator.dupe(u8, selected.store_type),
     };
 }
 
@@ -175,7 +177,7 @@ fn parseStoresJson(allocator: std.mem.Allocator, json_str: []const u8, stores: *
     var pos = after_key;
     while (pos < json_str.len and json_str[pos] != '[' and json_str[pos] != '{') : (pos += 1) {}
     if (pos >= json_str.len) return;
-    
+
     const is_array = json_str[pos] == '[';
     if (is_array) {
         pos += 1; // skip '['

@@ -256,18 +256,18 @@ fn readStdinLine(buf: []u8) !?[]u8 {
     return buf[0..pos];
 }
 
-const DurationParts = struct {
-    hours: i64,
-    minutes: i64,
-    seconds: i64,
+pub const DurationParts = struct {
+    hours: u64,
+    minutes: u64,
+    seconds: u64,
 };
 
 pub fn secondsToHms(total_seconds: i64) DurationParts {
-    const safe_seconds = if (total_seconds < 0) 0 else total_seconds;
-    const hours = @divTrunc(safe_seconds, 3600);
-    const remaining_after_hours = @rem(safe_seconds, 3600);
-    const minutes = @divTrunc(remaining_after_hours, 60);
-    const seconds = @rem(remaining_after_hours, 60);
+    const safe_seconds: u64 = @intCast(if (total_seconds < 0) 0 else total_seconds);
+    const hours = safe_seconds / 3600;
+    const remaining_after_hours = safe_seconds % 3600;
+    const minutes = remaining_after_hours / 60;
+    const seconds = remaining_after_hours % 60;
     return .{ .hours = hours, .minutes = minutes, .seconds = seconds };
 }
 
