@@ -1058,6 +1058,38 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     ui.clearScreen();
     ui.printSectionTitle("Importando...");
 
+    // Obtener tamaño del PST
+    var pst_size_bytes: ?u64 = null;
+    if (std.fs.openFileAbsolute(config.pst_path, .{})) |file| {
+        defer file.close();
+        if (file.stat()) |stat| {
+            pst_size_bytes = stat.size;
+        } else |_| {}
+    } else |_| {}
+
+    var size_str_buf: [32]u8 = undefined;
+    var size_str: []const u8 = "Desconocido";
+    if (pst_size_bytes) |bytes| {
+        const size_gb = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
+        if (size_gb >= 0.1) {
+            size_str = std.fmt.bufPrint(&size_str_buf, "{d:.2} GB", .{size_gb}) catch "Error";
+        } else {
+            const size_mb = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0);
+            size_str = std.fmt.bufPrint(&size_str_buf, "{d:.2} MB", .{size_mb}) catch "Error";
+        }
+    }
+
+    // Mostrar el resumen general de los parámetros de importación
+    std.debug.print("  \x1b[1;30m======================================================================\x1b[0m\n", .{});
+    std.debug.print("  \x1b[1;37mPST de origen:\x1b[0m     {s} ({s})\n", .{ config.pst_path, size_str });
+    std.debug.print("  \x1b[1;37mBuzon de destino:\x1b[0m  {s}\n", .{config.target_store_name});
+    if (config.filter_year) |y| {
+        std.debug.print("  \x1b[1;37mFiltro de anios:\x1b[0m  {s}\n", .{y});
+    } else {
+        std.debug.print("  \x1b[1;37mFiltro de anios:\x1b[0m  Todos los anios\n", .{});
+    }
+    std.debug.print("  \x1b[1;30m======================================================================\x1b[0m\n\n", .{});
+
     // Write the import script to temp
     const script_path = try ps_runner.writeEmbeddedScript(allocator, .import_pst);
     defer ps_runner.cleanupScript(allocator, script_path);
@@ -1157,9 +1189,9 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     }
 
     if (error_message) |msg| {
-        ui.printError(msg);
+       ui.printError(msg);
         ui.waitForEnter();
-        return;
+       return;
     }
 
     if (result_line == null and output.len == 0) {
@@ -1169,13 +1201,13 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     }
 
     if (result_line == null and last_copied == 0 and last_moved == 0 and last_skipped == 0 and last_failed == 0) {
-        ui.printError("La importacion no devolvio resultado final (restoreResult).");
+       ui.printError("La importacion no devolvio resultado final (restoreResult).");
         if (output.len > 0) {
             std.debug.print("\n  \x1b[91mSalida/Error del script:\x1b[0m\n", .{});
             std.debug.print("  {s}\n", .{output});
         }
         ui.waitForEnter();
-        return;
+       return;
     }
 
     // Show final results
