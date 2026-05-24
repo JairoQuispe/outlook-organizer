@@ -22,11 +22,16 @@ pub fn writeEmbeddedScript(allocator: std.mem.Allocator, script_id: ScriptId) ![
         .scan_pst => @embedFile("outlook-scan-pst.ps1"),
     };
 
-    const filename = switch (script_id) {
-        .import_pst => "oo-import-pst.ps1",
-        .list_stores => "oo-list-stores.ps1",
-        .scan_pst => "oo-scan-pst.ps1",
+    const script_tag = switch (script_id) {
+        .import_pst => "import-pst",
+        .list_stores => "list-stores",
+        .scan_pst => "scan-pst",
     };
+
+    const pid: u32 = std.os.windows.GetCurrentProcessId();
+    const ts: u64 = @intCast(@max(@as(i64, @intCast(std.time.milliTimestamp())), 0));
+    const filename = try std.fmt.allocPrint(allocator, "oo-{s}-{d}-{d}.ps1", .{ script_tag, pid, ts });
+    defer allocator.free(filename);
 
     // Use Windows TEMP directory
     const temp_dir = std.process.getEnvVarOwned(allocator, "TEMP") catch |err| {

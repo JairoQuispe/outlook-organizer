@@ -68,10 +68,10 @@ const ImportConfig = struct {
     profile_name: ?[]const u8,
 };
 
-fn chooseOutlookProfile(allocator: std.mem.Allocator) ![]const u8 {
+fn chooseOutlookProfile(allocator: std.mem.Allocator) !?[]const u8 {
     var cursor: usize = 0;
     const labels = [_][]const u8{
-        "Usar perfil predeterminado (\"Outlook\")",
+        "Usar perfil predeterminado de Outlook",
         "Especificar nombre del perfil",
     };
 
@@ -98,7 +98,7 @@ fn chooseOutlookProfile(allocator: std.mem.Allocator) ![]const u8 {
             },
             '\r', '\n' => {
                 if (cursor == 0) {
-                    return try allocator.dupe(u8, "Outlook");
+                    return null;
                 }
 
                 while (true) {
@@ -161,6 +161,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
     };
     defer allocator.free(pst_path);
 
+    // Step 2: Select Outlook profile
+    const profile_name = chooseOutlookProfile(allocator) catch {
+        ui.printError("Error seleccionando perfil de Outlook");
+        ui.waitForEnter();
+        return;
+    };
+    defer if (profile_name) |p| allocator.free(p);
+
     // Step 3: Scan PST and choose folders
     const scan_mode = chooseScanMode(allocator) catch {
         ui.printError("Error leyendo modo de escaneo");
@@ -175,7 +183,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     };
     defer if (scan_filter_year) |y| allocator.free(y);
 
-    const folder_selection = runScanAndSelectFolders(allocator, pst_path, scan_mode, scan_filter_year, null) catch |err| {
+    const folder_selection = runScanAndSelectFolders(allocator, pst_path, scan_mode, scan_filter_year, profile_name) catch |err| {
         if (err == error.Cancelled) {
             std.debug.print("\n  \x1b[90mOperacion cancelada.\x1b[0m\n", .{});
             ui.waitForEnter();
@@ -258,14 +266,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     std.debug.print("  \x1b[33mActivar throttling adaptativo? (S/n) [S]:\x1b[0m ", .{});
     const adaptive_throttling = ui.readYesNo(true);
 
-    const profile_name = chooseOutlookProfile(allocator) catch {
-        ui.printError("Error seleccionando perfil de Outlook");
-        ui.waitForEnter();
-        return;
-    };
-    defer allocator.free(profile_name);
-
-    // Step 2: Select target store
+    // Step 9: Select target store
     const selected_store = store_selector.selectTargetStore(allocator, profile_name) catch {
         ui.printError("Error seleccionando buzon destino");
         ui.waitForEnter();
@@ -295,9 +296,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
     ui.clearScreen();
     ui.printSectionTitle("Resumen de importacion");
     std.debug.print("  \x1b[1;37mArchivo PST:\x1b[0m   {s}\n", .{config.pst_path});
-    if (config.profile_name) |p| {
-        std.debug.print("  \x1b[1;37mPerfil Outlook:\x1b[0m {s}\n", .{p});
-    }
+    const profile_display = if (config.profile_name) |p|
+        if (p.len > 0) p else "Perfil predeterminado"
+    else
+        "Perfil predeterminado";
+    std.debug.print("  \x1b[1;37mPerfil Outlook:\x1b[0m {s}\n", .{profile_display});
     std.debug.print("  \x1b[1;37mBuzon destino:\x1b[0m {s}\n", .{config.target_store_name});
     var store_type_friendly: []const u8 = "Desconocido";
     if (std.mem.eql(u8, config.target_store_type, "ExchangeOnline")) {
@@ -359,12 +362,16 @@ fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
         }
     }
 
-    const processed = state.copied + state.moved;
     const total_script_processed = state.copied + state.moved + state.skipped + state.failed;
+    const percent_effective: u32 = if (state.percent > 0)
+        if (state.percent >= 100) 100 else state.percent
+    else
+        @as(u32, if (total_script_processed > 0) 1 else 0);
     var total_estimated = total_script_processed;
-    if (state.percent > 0) {
-        total_estimated = @divTrunc(total_script_processed * 100, @as(i64, @intCast(state.percent)));
-        if (total_estimated < total_script_processed) total_estimated = total_script_processed;
+    if (percent_effective > 0) {
+        var est = @divTrunc(total_script_processed * 100, @as(i64, @intCast(percent_effective)));
+        if (est < total_script_processed) est = total_script_processed;
+        total_estimated = est;
     }
     const remaining = @max(total_estimated - total_script_processed, 0);
     const elapsed_ms = std.time.milliTimestamp() - state.start_ms;
@@ -378,7 +385,7 @@ fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
     const current_status = extractString(line, "status") orelse "";
     std.debug.print("\r\x1b[2K  \x1b[90mCarpeta:\x1b[0m {s}\n", .{current_status});
 
-    ui.printProgressBar(state.percent, "Importando");
+    ui.printProgressBar(percent_effective, "Importando");
 
     const elapsed_sec = @divTrunc(elapsed_ms, 1000);
     const elapsed_parts = ui.secondsToHms(elapsed_sec);
@@ -395,18 +402,19 @@ fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
         }
     }
 
-    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m {d} ({s}) \x1b[90m| Omitidos:\x1b[0m {d} \x1b[90m| Restantes(est):\x1b[0m {d} \x1b[90m| Transcurrido:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
-        processed,
+    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m {d} ({s}) \x1b[90m| Copiados:\x1b[0m {d} \x1b[90m| Omitidos:\x1b[0m {d} \x1b[90m| Restantes(est):\x1b[0m {d} \x1b[90m| Transcurrido:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
+        total_script_processed,
         size_str,
-        state.skipped,
+        state.copied + state.moved,
+        state.skipped + state.failed,
         remaining,
         elapsed_parts.hours,
         elapsed_parts.minutes,
         elapsed_parts.seconds,
     });
 
-    if (state.percent > 0 and state.percent < 100) {
-        const total_est_ms = @divTrunc(elapsed_ms * 100, @as(i64, @intCast(state.percent)));
+    if (percent_effective > 0 and percent_effective < 100) {
+        const total_est_ms = @divTrunc(elapsed_ms * 100, @as(i64, @intCast(percent_effective)));
         const eta_ms = @max(total_est_ms - elapsed_ms, 0);
         const eta_s = @divTrunc(eta_ms, 1000);
         const eta_parts = ui.secondsToHms(eta_s);
@@ -1068,8 +1076,9 @@ fn makeTempFilePath(allocator: std.mem.Allocator, prefix: []const u8, ext: []con
     };
     defer allocator.free(temp_dir);
 
+    const pid: u32 = std.os.windows.GetCurrentProcessId();
     const ts: u64 = @intCast(@max(std.time.milliTimestamp(), 0));
-    const file_name = try std.fmt.allocPrint(allocator, "{s}-{d}.{s}", .{ prefix, ts, ext });
+    const file_name = try std.fmt.allocPrint(allocator, "{s}-{d}-{d}.{s}", .{ prefix, pid, ts, ext });
     defer allocator.free(file_name);
 
     return try std.fs.path.join(allocator, &.{ temp_dir, file_name });
@@ -1138,6 +1147,11 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
     // Mostrar el resumen general de los parámetros de importación
     std.debug.print("  \x1b[1;30m======================================================================\x1b[0m\n", .{});
     std.debug.print("  \x1b[1;37mPST de origen:\x1b[0m     {s} ({s})\n", .{ config.pst_path, size_str });
+    const profile_display = if (config.profile_name) |p|
+        if (p.len > 0) p else "Perfil predeterminado"
+    else
+        "Perfil predeterminado";
+    std.debug.print("  \x1b[1;37mPerfil Outlook:\x1b[0m    {s}\n", .{profile_display});
     std.debug.print("  \x1b[1;37mBuzon de destino:\x1b[0m  {s}\n", .{config.target_store_name});
 
     var store_type_friendly: []const u8 = "Desconocido";
@@ -1327,12 +1341,12 @@ fn executeImport(allocator: std.mem.Allocator, config: ImportConfig) !void {
 
 fn extractNumber(json: []const u8, key: []const u8) ?i64 {
     var search_buf: [128]u8 = undefined;
-    const search = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{key}) catch return null;
+    const search = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
     const key_pos = std.mem.indexOf(u8, json, search) orelse return null;
     var pos = key_pos + search.len;
 
-    // Skip : and whitespace
-    while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
+    // Skip whitespace (just in case)
+    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
     if (pos >= json.len) return null;
 
     // Read number (may have minus sign)

@@ -128,6 +128,25 @@ function Resolve-StoreCategory {
     return 'Unknown'
 }
 
+function Get-OutlookExePath {
+    $paths = @(
+        "${env:ProgramFiles}\Microsoft Office\root\Office16\OUTLOOK.EXE",
+        "${env:ProgramFiles}\Microsoft Office\root\Office15\OUTLOOK.EXE",
+        "${env:ProgramFiles}\Microsoft Office\Office16\OUTLOOK.EXE",
+        "${env:ProgramFiles}\Microsoft Office\Office15\OUTLOOK.EXE",
+        "${env:ProgramFiles(x86)}\Microsoft Office\Office16\OUTLOOK.EXE",
+        "${env:ProgramFiles(x86)}\Microsoft Office\Office15\OUTLOOK.EXE",
+        "OUTLOOK.EXE"
+    )
+    foreach ($p in $paths) {
+        try {
+            $cmd = Get-Command $p -ErrorAction Stop
+            if ($cmd) { return $cmd.Source }
+        } catch {}
+    }
+    return "OUTLOOK.EXE"
+}
+
 if ($MyInvocation.InvocationName -ne ".") {
     $outlook = $null
     $namespace = $null
@@ -200,10 +219,45 @@ if ($MyInvocation.InvocationName -ne ".") {
                 try {
                     $currentProfile = $namespace.CurrentProfileName
                     if ($currentProfile -ine $targetProfile) {
-                        throw "Conflicto de perfil: Outlook esta abierto con el perfil '$currentProfile', pero se solicito '$targetProfile'. Por favor, cierra Outlook e intenta de nuevo."
+                        Write-Warning "Perfil actual '$currentProfile' != solicitado '$targetProfile'. Reiniciando Outlook con el perfil '$targetProfile'..."
+
+                        if ($namespace) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($namespace) | Out-Null; $namespace = $null }
+                        if ($outlook) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($outlook) | Out-Null; $outlook = $null }
+
+                        $outlookPath = Get-OutlookExePath
+                        Start-Process -FilePath $outlookPath -ArgumentList "/recycle", "/profile", "`"$targetProfile`"" -WindowStyle Hidden
+
+                        $maxWait = 45
+                        $waited = 0
+                        while ($waited -lt $maxWait) {
+                            Start-Sleep -Seconds 1
+                            $waited++
+                            try {
+                                $outlook = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
+                                $namespace = $outlook.GetNamespace("MAPI")
+                                try { $namespace.Logon($ProfileName, "", $false, $false) } catch {}
+                                $newProfile = $namespace.CurrentProfileName
+                                if ($newProfile -ine $targetProfile) {
+                                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($namespace) | Out-Null; $namespace = $null
+                                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($outlook) | Out-Null; $outlook = $null
+                                    continue
+                                }
+                                break
+                            } catch {
+                                $outlook = $null
+                                $namespace = $null
+                            }
+                        }
+
+                        if (-not $outlook -or -not $namespace) {
+                            throw "No se pudo reiniciar Outlook con el perfil '$targetProfile'. Por favor, cierra Outlook manualmente e intenta de nuevo."
+                        }
+
+                        $createdOutlook = $true
+                        Write-Verbose "Outlook reiniciado exitosamente con el perfil '$targetProfile'"
                     }
                 } catch {
-                    if ($_.Exception.Message -like "*Conflicto de perfil*") { throw }
+                    if ($_.Exception.Message -like "*No se pudo reiniciar Outlook*") { throw }
                 }
 
                 break
