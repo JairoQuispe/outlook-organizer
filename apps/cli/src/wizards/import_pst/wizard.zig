@@ -315,6 +315,18 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 fn runMultiPstBatch(allocator: std.mem.Allocator, pst_paths: [][]const u8) !void {
+    const BatchPstConfig = struct {
+        pst_path: []const u8,
+        folder_plan_path: []const u8,
+        scan_export_path: []const u8,
+        selected_count: usize,
+        total_count: usize,
+        target_store_id: []const u8,
+        target_store_name: []const u8,
+        target_store_type: []const u8,
+        routing_mappings: ?[]const types.TargetStoreMapping,
+    };
+
     const reference_pst_path = pst_paths[0];
 
     const profile_name = prompts.chooseOutlookProfile(allocator) catch {
@@ -389,11 +401,163 @@ fn runMultiPstBatch(allocator: std.mem.Allocator, pst_paths: [][]const u8) !void
     std.debug.print("  \x1b[33mActivar throttling adaptativo? (S/n) [S]:\x1b[0m ", .{});
     const adaptive_throttling = ui.readYesNo(true);
 
+    var batch_configs = std.ArrayListUnmanaged(BatchPstConfig){};
+    defer {
+        for (batch_configs.items) |cfg| {
+            utils.cleanupTempFile(cfg.folder_plan_path);
+            allocator.free(cfg.folder_plan_path);
+            utils.cleanupTempFile(cfg.scan_export_path);
+            allocator.free(cfg.scan_export_path);
+            allocator.free(cfg.target_store_id);
+            allocator.free(cfg.target_store_name);
+            allocator.free(cfg.target_store_type);
+            if (cfg.routing_mappings) |mappings| {
+                for (mappings) |m| {
+                    allocator.free(m.store_id);
+                    allocator.free(m.store_name);
+                    allocator.free(m.store_type);
+                }
+                allocator.free(mappings);
+            }
+        }
+        batch_configs.deinit(allocator);
+    }
+
+    for (pst_paths, 0..) |current_pst, idx| {
+        ui.clearScreen();
+        ui.printSectionTitle("Configurar PST del Lote");
+        std.debug.print("  \x1b[1;37mPST {d} de {d}:\x1b[0m {s}\n\n", .{ idx + 1, pst_paths.len, current_pst });
+        std.debug.print("  \x1b[90mSe escaneara este PST para mostrar anios/meses y definir destino(s).\x1b[0m\n\n", .{});
+
+        const folder_selection = runScanAndSelectFolders(allocator, current_pst, scan_mode, scan_filter_year, profile_name, enable_routing) catch |err| {
+            if (err == error.Cancelled) {
+                std.debug.print("  \x1b[33mPST omitido por cancelacion de seleccion de carpetas.\x1b[0m\n", .{});
+                ui.waitForEnter();
+                continue;
+            }
+            ui.printError("Error escaneando PST o seleccionando carpetas para este archivo");
+            ui.waitForEnter();
+            continue;
+        };
+
+        var routing_mappings: ?[]const types.TargetStoreMapping = null;
+        var selected_store_id: ?[]const u8 = null;
+        var selected_store_name: ?[]const u8 = null;
+        var selected_store_type: ?[]const u8 = null;
+
+        if (enable_routing) {
+            const routing_wizard = @import("routing_wizard.zig");
+            routing_mappings = routing_wizard.configureMappings(allocator, routing_criterion.?, folder_selection.scan_export_path, profile_name) catch |err| {
+                utils.cleanupTempFile(folder_selection.folder_plan_path);
+                allocator.free(folder_selection.folder_plan_path);
+                utils.cleanupTempFile(folder_selection.scan_export_path);
+                allocator.free(folder_selection.scan_export_path);
+                if (err == error.Cancelled) {
+                    std.debug.print("  \x1b[33mPST omitido por cancelacion en configuracion de enrutamiento.\x1b[0m\n", .{});
+                    ui.waitForEnter();
+                    continue;
+                }
+                ui.printError("Error configurando el enrutamiento para este PST");
+                ui.waitForEnter();
+                continue;
+            };
+
+            for (routing_mappings.?) |m| {
+                if (m.store_id.len > 0) {
+                    selected_store_id = try allocator.dupe(u8, m.store_id);
+                    selected_store_name = try allocator.dupe(u8, m.store_name);
+                    selected_store_type = try allocator.dupe(u8, m.store_type);
+                    break;
+                }
+            }
+
+            if (selected_store_id == null or selected_store_name == null or selected_store_type == null) {
+                if (routing_mappings) |mappings| {
+                    for (mappings) |m| {
+                        allocator.free(m.store_id);
+                        allocator.free(m.store_name);
+                        allocator.free(m.store_type);
+                    }
+                    allocator.free(mappings);
+                }
+                utils.cleanupTempFile(folder_selection.folder_plan_path);
+                allocator.free(folder_selection.folder_plan_path);
+                utils.cleanupTempFile(folder_selection.scan_export_path);
+                allocator.free(folder_selection.scan_export_path);
+                ui.printError("No se asigno ningun buzon en el mapeo de enrutamiento para este PST");
+                ui.waitForEnter();
+                continue;
+            }
+        } else {
+            ui.clearScreen();
+            ui.printSectionTitle("Destino para PST");
+            std.debug.print("  \x1b[1;37mPST {d} de {d}:\x1b[0m {s}\n", .{ idx + 1, pst_paths.len, current_pst });
+            std.debug.print("  \x1b[90mCarpetas seleccionadas: {d}/{d}. Elige el buzon destino para este PST.\x1b[0m\n\n", .{ folder_selection.selected_count, folder_selection.total_count });
+
+            const selected_store = store_selector.selectTargetStore(allocator, profile_name) catch {
+                utils.cleanupTempFile(folder_selection.folder_plan_path);
+                allocator.free(folder_selection.folder_plan_path);
+                utils.cleanupTempFile(folder_selection.scan_export_path);
+                allocator.free(folder_selection.scan_export_path);
+                ui.printError("Error seleccionando buzon destino para este PST");
+                ui.waitForEnter();
+                continue;
+            };
+            selected_store_id = selected_store.store_id;
+            selected_store_name = selected_store.display_name;
+            selected_store_type = selected_store.store_type;
+        }
+
+        batch_configs.append(allocator, .{
+            .pst_path = current_pst,
+            .folder_plan_path = folder_selection.folder_plan_path,
+            .scan_export_path = folder_selection.scan_export_path,
+            .selected_count = folder_selection.selected_count,
+            .total_count = folder_selection.total_count,
+            .target_store_id = selected_store_id.?,
+            .target_store_name = selected_store_name.?,
+            .target_store_type = selected_store_type.?,
+            .routing_mappings = routing_mappings,
+        }) catch {
+            if (routing_mappings) |mappings| {
+                for (mappings) |m| {
+                    allocator.free(m.store_id);
+                    allocator.free(m.store_name);
+                    allocator.free(m.store_type);
+                }
+                allocator.free(mappings);
+            }
+            allocator.free(selected_store_id.?);
+            allocator.free(selected_store_name.?);
+            allocator.free(selected_store_type.?);
+            utils.cleanupTempFile(folder_selection.folder_plan_path);
+            allocator.free(folder_selection.folder_plan_path);
+            utils.cleanupTempFile(folder_selection.scan_export_path);
+            allocator.free(folder_selection.scan_export_path);
+            return error.OutOfMemory;
+        };
+    }
+
+    if (batch_configs.items.len == 0) {
+        ui.printError("No hay PST configurados para ejecutar en el lote.");
+        ui.waitForEnter();
+        return;
+    }
+
     ui.clearScreen();
     ui.printSectionTitle("Resumen de lote");
-    std.debug.print("  \x1b[1;37mPSTs a procesar:\x1b[0m {d}\n", .{pst_paths.len});
-    for (pst_paths) |p| {
-        std.debug.print("    - {s}\n", .{p});
+    std.debug.print("  \x1b[1;37mPSTs configurados:\x1b[0m {d}\n", .{batch_configs.items.len});
+    for (batch_configs.items, 0..) |cfg, idx| {
+        std.debug.print("\n  \x1b[1;37m[{d}]\x1b[0m {s}\n", .{ idx + 1, cfg.pst_path });
+        std.debug.print("      Buzon destino: {s}\n", .{cfg.target_store_name});
+        std.debug.print("      Carpetas: {d}/{d}\n", .{ cfg.selected_count, cfg.total_count });
+        if (enable_routing and cfg.routing_mappings != null) {
+            var mapped_count: usize = 0;
+            for (cfg.routing_mappings.?) |m| {
+                if (m.store_id.len > 0) mapped_count += 1;
+            }
+            std.debug.print("      Mapeos routing: {d}\n", .{mapped_count});
+        }
     }
     std.debug.print("  \x1b[1;37mEscaneo:\x1b[0m         {s}\n", .{if (scan_mode == .deep) "Profundo" else "Rapido"});
     std.debug.print("  \x1b[1;37mAccion:\x1b[0m          {s}\n", .{action});
@@ -411,113 +575,40 @@ fn runMultiPstBatch(allocator: std.mem.Allocator, pst_paths: [][]const u8) !void
         return;
     }
 
-    for (pst_paths, 0..) |current_pst, idx| {
+    for (batch_configs.items, 0..) |cfg, idx| {
         ui.clearScreen();
         ui.printSectionTitle("Progreso del Lote");
-        std.debug.print("  \x1b[1;37mPST {d} de {d}:\x1b[0m {s}\n\n", .{ idx + 1, pst_paths.len, current_pst });
+        std.debug.print("  \x1b[1;37mPST {d} de {d}:\x1b[0m {s}\n", .{ idx + 1, batch_configs.items.len, cfg.pst_path });
+        std.debug.print("  \x1b[1;37mDestino:\x1b[0m {s}\n\n", .{cfg.target_store_name});
 
-        {
-            const folder_selection = runScanAndSelectFolders(allocator, current_pst, scan_mode, scan_filter_year, profile_name, enable_routing) catch |err| {
-                if (err == error.Cancelled) {
-                    std.debug.print("  \x1b[33mPST omitido por cancelacion de seleccion de carpetas.\x1b[0m\n", .{});
-                    ui.waitForEnter();
-                    continue;
-                }
-                ui.printError("Error escaneando PST o seleccionando carpetas para este archivo");
-                ui.waitForEnter();
-                continue;
-            };
-            defer {
-                utils.cleanupTempFile(folder_selection.folder_plan_path);
-                allocator.free(folder_selection.folder_plan_path);
-                utils.cleanupTempFile(folder_selection.scan_export_path);
-                allocator.free(folder_selection.scan_export_path);
-            }
+        const config = types.ImportConfig{
+            .pst_path = cfg.pst_path,
+            .target_store_id = cfg.target_store_id,
+            .target_store_name = cfg.target_store_name,
+            .target_store_type = cfg.target_store_type,
+            .action = action,
+            .skip_duplicates = skip_duplicates,
+            .deep_duplicate_check = deep_duplicate_check,
+            .filter_year = filter_year,
+            .filter_months = filter_months,
+            .folder_plan_path = cfg.folder_plan_path,
+            .adaptive_throttling = adaptive_throttling,
+            .profile_name = profile_name,
+            .routing_criterion = routing_criterion,
+            .routing_mappings = cfg.routing_mappings,
+        };
 
-            var routing_mappings: ?[]const types.TargetStoreMapping = null;
-            defer if (routing_mappings) |mappings| {
-                for (mappings) |m| {
-                    allocator.free(m.store_id);
-                    allocator.free(m.store_name);
-                    allocator.free(m.store_type);
-                }
-                allocator.free(mappings);
-            };
-
-            var selected_store_id: ?[]const u8 = null;
-            var selected_store_name: ?[]const u8 = null;
-            var selected_store_type: ?[]const u8 = null;
-            defer if (selected_store_id) |s| allocator.free(s);
-            defer if (selected_store_name) |s| allocator.free(s);
-            defer if (selected_store_type) |s| allocator.free(s);
-
-            if (enable_routing) {
-                const routing_wizard = @import("routing_wizard.zig");
-                routing_mappings = routing_wizard.configureMappings(allocator, routing_criterion.?, folder_selection.scan_export_path, profile_name) catch |err| {
-                    if (err == error.Cancelled) {
-                        std.debug.print("  \x1b[33mPST omitido por cancelacion en configuracion de enrutamiento.\x1b[0m\n", .{});
-                        ui.waitForEnter();
-                        continue;
-                    }
-                    ui.printError("Error configurando el enrutamiento para este PST");
-                    ui.waitForEnter();
-                    continue;
-                };
-
-                for (routing_mappings.?) |m| {
-                    if (m.store_id.len > 0) {
-                        selected_store_id = try allocator.dupe(u8, m.store_id);
-                        selected_store_name = try allocator.dupe(u8, m.store_name);
-                        selected_store_type = try allocator.dupe(u8, m.store_type);
-                        break;
-                    }
-                }
-
-                if (selected_store_id == null or selected_store_name == null or selected_store_type == null) {
-                    ui.printError("No se asigno ningun buzon en el mapeo de enrutamiento para este PST");
-                    ui.waitForEnter();
-                    continue;
-                }
-            } else {
-                const selected_store = store_selector.selectTargetStore(allocator, profile_name) catch {
-                    ui.printError("Error seleccionando buzon destino para este PST");
-                    ui.waitForEnter();
-                    continue;
-                };
-                selected_store_id = selected_store.store_id;
-                selected_store_name = selected_store.display_name;
-                selected_store_type = selected_store.store_type;
-            }
-
-            const config = types.ImportConfig{
-                .pst_path = current_pst,
-                .target_store_id = selected_store_id.?,
-                .target_store_name = selected_store_name.?,
-                .target_store_type = selected_store_type.?,
-                .action = action,
-                .skip_duplicates = skip_duplicates,
-                .deep_duplicate_check = deep_duplicate_check,
-                .filter_year = filter_year,
-                .filter_months = filter_months,
-                .folder_plan_path = folder_selection.folder_plan_path,
-                .adaptive_throttling = adaptive_throttling,
-                .profile_name = profile_name,
-                .routing_criterion = routing_criterion,
-                .routing_mappings = routing_mappings,
-            };
-
-            executor.executeImport(allocator, config) catch |err| {
-                ui.printError("Error procesando este archivo PST, continuando con el siguiente...");
-                std.debug.print("  Detalle error: {}\n", .{err});
-                ui.waitForEnter();
-                continue;
-            };
-        }
+        executor.executeImport(allocator, config) catch |err| {
+            ui.printError("Error procesando este archivo PST, continuando con el siguiente...");
+            std.debug.print("  Detalle error: {}\n", .{err});
+            ui.waitForEnter();
+            continue;
+        };
     }
 
     ui.clearScreen();
     ui.printSectionTitle("Lote completado");
-    std.debug.print("  \x1b[1;32mProceso completado secuencialmente para {d} PSTs.\x1b[0m\n\n", .{pst_paths.len});
+    std.debug.print("  \x1b[1;32mProceso completado secuencialmente para {d} PSTs configurados.\x1b[0m\n\n", .{batch_configs.items.len});
     ui.waitForEnter();
 }
 
