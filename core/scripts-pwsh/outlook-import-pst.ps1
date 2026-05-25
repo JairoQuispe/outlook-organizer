@@ -1613,7 +1613,6 @@ function Restore-FolderRecursive {
                             try { $itemDate = $item.CreationTime } catch {}
                         }
                         if (-not $itemDate -or $itemDate.Year -ne $script:FilterOnlyYear) {
-                            Invoke-ItemSkipped -stats $stats -folderPath $folderPath
                             continue
                         }
                     }
@@ -1634,7 +1633,6 @@ function Restore-FolderRecursive {
                             try { $monthMatches = $script:FilterOnlyMonthLookup.Contains($monthValue) } catch { $monthMatches = $false }
                         }
                         if (-not $itemDate -or -not $monthMatches) {
-                            Invoke-ItemSkipped -stats $stats -folderPath $folderPath
                             continue
                         }
                     }
