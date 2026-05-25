@@ -67,10 +67,27 @@ param (
     [int]$MaxFailureRecords = 1000,
 
     [Parameter(Mandatory=$false)]
-    [string]$ProfileName
+    [string]$ProfileName,
+
+    [Parameter(Mandatory=$false)]
+    [string]$RoutingCriterion,
+
+    [Parameter(Mandatory=$false)]
+    [string]$RoutingMappingsJson
 )
 
 $ErrorActionPreference = "Stop"
+
+$script:Action = if ($Action -ieq "Move") { "Move" } else { "Copy" }
+$Action = $script:Action
+$script:RoutingCriterion = $null
+if ($RoutingCriterion) {
+    $script:RoutingCriterion = ([string]$RoutingCriterion).Trim().ToLowerInvariant()
+    if ($script:RoutingCriterion -ne "by_year" -and $script:RoutingCriterion -ne "by_month") {
+        Emit-ErrorPayload "RoutingCriterion invalido: '$RoutingCriterion'. Valores permitidos: by_year, by_month."
+        Exit-WithCleanup 1
+    }
+}
 
 $script:IsHeadlessOutput = ($Json -or $Headless)
 if ($script:IsHeadlessOutput) {
@@ -139,6 +156,25 @@ $script:FolderPlanContext = @{
 }
 
 function Cleanup-ComResources {
+    if ($script:StoreCache) {
+        try {
+            foreach ($storeId in $script:StoreCache.Keys) {
+                Release-ComObjectSafe $script:StoreCache[$storeId]
+            }
+            $script:StoreCache.Clear()
+        } catch {}
+    }
+    $script:StoreCache = $null
+    if ($script:RoutingMappings) {
+        try {
+            foreach ($m in $script:RoutingMappings) {
+                Release-ComObjectSafe $m.rootObj
+                Release-ComObjectSafe $m.storeObj
+            }
+        } catch {}
+    }
+    $script:RoutingMappings = $null
+
     if ($script:ChildFolderCache) {
         try {
             foreach ($childDict in $script:ChildFolderCache.Values) {
@@ -1560,16 +1596,6 @@ function Restore-FolderRecursive {
         return
     }
 
-    $existingKeys = $null
-    if ($script:SkipDuplicates) {
-        Emit-Log "info" "Indexando duplicados en: $folderPath"
-        $existingKeys = Build-DuplicateIndex -targetFolder $destFolder -Deep:$script:DeepDuplicateCheck
-        Emit-Log "info" "Indice inicial: $($existingKeys.Count) claves existentes + $($script:RuntimeDupKeys.Count) runtime$(if ($script:DeepDuplicateCheck) { ' (deep)' })"
-    }
-    if (-not $existingKeys) {
-        $existingKeys = New-Object 'System.Collections.Generic.HashSet[string]'
-    }
-
     $items = $null
     try {
         try { $items = $sourceFolder.Items } catch {
@@ -1605,25 +1631,44 @@ function Restore-FolderRecursive {
                     }
 
                     $itemDate = $null
+                    try { $itemDate = $item.ReceivedTime } catch {}
+                    if (-not $itemDate) {
+                        try { $itemDate = $item.CreationTime } catch {}
+                    }
+
+                    # --- Enrutamiento Dinámico por Item ---
+                    $effectiveDestFolder = $destFolder
+                    if ($script:RoutingEnabled -and $itemDate) {
+                        $matchedMapping = $null
+                        if ($script:RoutingCriterion -eq "by_year") {
+                            $matchedMapping = $script:RoutingMappings | Where-Object { $_.year -eq $itemDate.Year } | Select-Object -First 1
+                        } else {
+                            $matchedMapping = $script:RoutingMappings | Where-Object { $_.year -eq $itemDate.Year -and $_.month -eq $itemDate.Month } | Select-Object -First 1
+                        }
+
+                        if ($matchedMapping) {
+                            # Si coincide con un buzón enrutado, resolvemos la carpeta correspondiente en ese buzón
+                            $effectiveDestFolder = Resolve-TargetFolderByPath -targetStore $matchedMapping.storeObj -targetRoot $matchedMapping.rootObj -SourcePath $folderPath
+                            if (-not $effectiveDestFolder) {
+                                Emit-Log "error" "No se pudo resolver carpeta destino '$folderPath' en buzon enrutado '$($matchedMapping.storeObj.DisplayName)'."
+                                $stats.Value.failed++
+                                continue
+                            }
+                        } else {
+                            # Si no hay mapeo específico para este año/mes, se omite el mensaje (o va al destino por defecto si se desea, pero la consigna indica mapear y omitir si no está asignado)
+                            $stats.Value.skipped++
+                            $stats.Value.processed++
+                            continue
+                        }
+                    }
 
                     if ($script:FilterOnlyYear) {
-                        $itemDate = $null
-                        try { $itemDate = $item.ReceivedTime } catch {}
-                        if (-not $itemDate) {
-                            try { $itemDate = $item.CreationTime } catch {}
-                        }
                         if (-not $itemDate -or $itemDate.Year -ne $script:FilterOnlyYear) {
                             continue
                         }
                     }
 
                     if ($hasMonthFilter) {
-                        if (-not $itemDate) {
-                            try { $itemDate = $item.ReceivedTime } catch {}
-                            if (-not $itemDate) {
-                                try { $itemDate = $item.CreationTime } catch {}
-                            }
-                        }
                         $monthValue = $null
                         if ($itemDate) {
                             try { $monthValue = [int]$itemDate.Month } catch { $monthValue = $null }
@@ -1638,12 +1683,18 @@ function Restore-FolderRecursive {
                     }
 
                     $dupKey = $null
-                    if ($existingKeys) {
+                    $effectiveExistingKeys = $null
+                    if ($script:SkipDuplicates) {
                         $dupKey = Get-DuplicateKeyFromItem -item $item
                         if ($dupKey) {
+                            $effectiveExistingKeys = Build-DuplicateIndex -targetFolder $effectiveDestFolder -Deep:$script:DeepDuplicateCheck
+                            if (-not $effectiveExistingKeys) {
+                                $effectiveExistingKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+                            }
+
                             $isDup = $false
                             $dupSource = $null
-                            if ($existingKeys.Contains([string]$dupKey)) {
+                            if ($effectiveExistingKeys.Contains([string]$dupKey)) {
                                 $isDup = $true
                                 $dupSource = "existing"
                             } elseif ($script:RuntimeDupKeys.Contains([string]$dupKey)) {
@@ -1685,12 +1736,12 @@ function Restore-FolderRecursive {
                     try {
                         Invoke-WithRetry -OperationName "$Action item" -Operation {
                             if ($Action -ieq "Move") {
-                                [void]$item.Move($destFolder)
+                                [void]$item.Move($effectiveDestFolder)
                             } else {
                                 $c = $item.Copy()
                                 try {
                                     if ($c) {
-                                        [void]$c.Move($destFolder)
+                                        [void]$c.Move($effectiveDestFolder)
                                     } else {
                                         throw "No se pudo copiar el item."
                                     }
@@ -1712,11 +1763,11 @@ function Restore-FolderRecursive {
                                 Emit-Log "info" "Adaptive recovery: multiplicador $([Math]::Round($oldMult,3)) -> $([Math]::Round($script:TokenBucket.adaptiveMultiplier,3)) (~${newRate} items/min)"
                             }
                         }
-                        if ($dupKey) {
+                        if ($script:SkipDuplicates -and $dupKey) {
                             [void]$script:RuntimeDupKeys.Add([string]$dupKey)
                             # Update folder cache so subsequent calls see this key
-                            if ($existingKeys) {
-                                [void]$existingKeys.Add([string]$dupKey)
+                            if ($effectiveExistingKeys) {
+                                [void]$effectiveExistingKeys.Add([string]$dupKey)
                             }
                         }
                     } catch {
@@ -1868,15 +1919,59 @@ $script:PstStoreRef = $pstStore
 $pstRoot = $pstStore.GetRootFolder()
 $script:PstRootRef = $pstRoot
 
-if (-not $TargetStoreId) { Emit-ErrorPayload "Se requiere -TargetStoreId."; Exit-WithCleanup 1 }
+# --- Inicialización de Mapeo de Enrutamiento (Multibuzón) ---
+$script:RoutingEnabled = [bool]$script:RoutingCriterion
+$script:StoreCache = New-Object 'System.Collections.Generic.Dictionary[string, object]'
+$script:RoutingMappings = @()
 
-$targetStore = Get-StoreByIdOrPath -namespace $namespace -StoreId $TargetStoreId
-if (-not $targetStore) {
-    Emit-ErrorPayload "No se encontró el buzón destino (StoreId=$TargetStoreId)."
-    Exit-WithCleanup 1
+if ($script:RoutingEnabled) {
+    Emit-Log "info" "Enrutamiento Multibuzón activo (Criterio: $script:RoutingCriterion)."
+    if (-not $RoutingMappingsJson) {
+        Emit-ErrorPayload "Se requiere -RoutingMappingsJson para el enrutamiento."
+        Exit-WithCleanup 1
+    }
+    try {
+        $decodedMappings = ConvertFrom-Json -InputObject $RoutingMappingsJson -ErrorAction Stop
+        foreach ($m in @($decodedMappings)) {
+            $storeObj = Get-StoreByIdOrPath -namespace $namespace -StoreId $m.storeId
+            if ($storeObj) {
+                $script:StoreCache[$m.storeId] = $storeObj
+                $script:RoutingMappings += [pscustomobject]@{
+                    year = $m.year
+                    month = if ($m.month -ne $null) { [int]$m.month } else { $null }
+                    storeId = $m.storeId
+                    storeObj = $storeObj
+                    rootObj = $storeObj.GetRootFolder()
+                }
+                Emit-Log "info" "  Mapeo: $(if ($m.month) { "$($m.year)-$($m.month)" } else { $m.year }) => $($storeObj.DisplayName)"
+            } else {
+                Emit-Log "warn" "  No se localizó el buzón de destino para ID $($m.storeId). Se omitirá este mapeo."
+            }
+        }
+        if ($script:RoutingMappings.Count -eq 0) {
+            Emit-ErrorPayload "Enrutamiento activo sin mapeos válidos resolubles a buzones destino."
+            Exit-WithCleanup 1
+        }
+    } catch {
+        Emit-ErrorPayload "No se pudo interpretar -RoutingMappingsJson: $($_.Exception.Message)"
+        Exit-WithCleanup 1
+    }
+}
+
+if (-not $TargetStoreId -and -not $script:RoutingEnabled) { Emit-ErrorPayload "Se requiere -TargetStoreId."; Exit-WithCleanup 1 }
+
+$targetStore = $null
+if ($TargetStoreId) {
+    $targetStore = Get-StoreByIdOrPath -namespace $namespace -StoreId $TargetStoreId
+    if (-not $targetStore -and -not $script:RoutingEnabled) {
+        Emit-ErrorPayload "No se encontró el buzón destino (StoreId=$TargetStoreId)."
+        Exit-WithCleanup 1
+    }
 }
 $script:TargetStoreRef = $targetStore
-Emit-Log "info" "Buzón destino: $($targetStore.DisplayName)"
+if ($targetStore) {
+    Emit-Log "info" "Buzón destino principal: $($targetStore.DisplayName)"
+}
 
 if ($usingFolderPlan) {
     Emit-Log "info" "Usando plan exportado: saltando análisis completo."

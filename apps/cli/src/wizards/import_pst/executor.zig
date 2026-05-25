@@ -212,7 +212,23 @@ pub fn executeImport(allocator: std.mem.Allocator, config: types.ImportConfig) !
     else
         "Perfil predeterminado";
     std.debug.print("  \x1b[1;37mPerfil Outlook:\x1b[0m    {s}\n", .{profile_display});
-    std.debug.print("  \x1b[1;37mBuzon de destino:\x1b[0m  {s}\n", .{config.target_store_name});
+
+    if (config.routing_criterion) |criterion| {
+        std.debug.print("  \x1b[1;37mEnrutamiento:\x1b[0m      Multibuzon (agrupado por {s})\n", .{if (criterion == .by_year) "Anos" else "Meses"});
+        if (config.routing_mappings) |mappings| {
+            for (mappings) |m| {
+                if (m.store_id.len > 0) {
+                    if (criterion == .by_year) {
+                        std.debug.print("    - Ano {d:4} => {s}\n", .{ m.year, m.store_name });
+                    } else {
+                        std.debug.print("    - {d:4}-{d:0>2} => {s}\n", .{ m.year, m.month.?, m.store_name });
+                    }
+                }
+            }
+        }
+    } else {
+        std.debug.print("  \x1b[1;37mBuzon de destino:\x1b[0m  {s}\n", .{config.target_store_name});
+    }
 
     var store_type_friendly: []const u8 = "Desconocido";
     if (std.mem.eql(u8, config.target_store_type, "ExchangeOnline")) {
@@ -259,6 +275,48 @@ pub fn executeImport(allocator: std.mem.Allocator, config: types.ImportConfig) !
         "-Json",
         "-Headless",
     });
+
+    // Agregar argumentos de enrutamiento si están definidos
+    var routing_json_buf = std.ArrayListUnmanaged(u8){};
+    defer routing_json_buf.deinit(allocator);
+
+    if (config.routing_criterion) |criterion| {
+        try args.append(allocator, "-RoutingCriterion");
+        try args.append(allocator, if (criterion == .by_year) "by_year" else "by_month");
+
+        if (config.routing_mappings) |mappings| {
+            try routing_json_buf.writer(allocator).writeAll("[");
+            var wrote_any = false;
+            for (mappings) |m| {
+                if (m.store_id.len == 0) continue;
+                if (wrote_any) try routing_json_buf.writer(allocator).writeAll(",");
+                try routing_json_buf.writer(allocator).print("{{\"year\":{d}", .{m.year});
+                if (m.month) |mon| {
+                    try routing_json_buf.writer(allocator).print(",\"month\":{d}", .{mon});
+                } else {
+                    try routing_json_buf.writer(allocator).writeAll(",\"month\":null");
+                }
+                try routing_json_buf.writer(allocator).writeAll(",\"storeId\":\"");
+                try utils.appendJsonEscaped(allocator, &routing_json_buf, m.store_id);
+                try routing_json_buf.writer(allocator).writeAll("\"}");
+                wrote_any = true;
+            }
+            try routing_json_buf.writer(allocator).writeAll("]");
+
+            if (!wrote_any) {
+                ui.printError("Enrutamiento activo sin mapeos validos (store_id vacio).");
+                ui.waitForEnter();
+                return;
+            }
+
+            try args.append(allocator, "-RoutingMappingsJson");
+            try args.append(allocator, routing_json_buf.items);
+        } else {
+            ui.printError("Enrutamiento activo sin RoutingMappings configurados.");
+            ui.waitForEnter();
+            return;
+        }
+    }
 
     if (config.skip_duplicates) {
         try args.append(allocator, "-SkipDuplicates");

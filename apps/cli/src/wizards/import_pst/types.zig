@@ -1,5 +1,18 @@
 const std = @import("std");
 
+pub const RoutingCriterion = enum {
+    by_year,
+    by_month,
+};
+
+pub const TargetStoreMapping = struct {
+    year: i32,
+    month: ?u8, // 1-12, null if Criterion == .by_year
+    store_id: []const u8,
+    store_name: []const u8,
+    store_type: []const u8,
+};
+
 pub const ScanMode = enum {
     quick,
     deep,
@@ -44,6 +57,7 @@ pub const FolderTree = struct {
 
 pub const FolderSelectionResult = struct {
     folder_plan_path: []u8,
+    scan_export_path: []u8,
     selected_count: usize,
     total_count: usize,
     scan_mode: ScanMode,
@@ -62,4 +76,6 @@ pub const ImportConfig = struct {
     folder_plan_path: []const u8,
     adaptive_throttling: bool,
     profile_name: ?[]const u8,
+    routing_criterion: ?RoutingCriterion,
+    routing_mappings: ?[]const TargetStoreMapping,
 };
