@@ -271,8 +271,52 @@ pub fn secondsToHms(total_seconds: i64) DurationParts {
     return .{ .hours = hours, .minutes = minutes, .seconds = seconds };
 }
 
+pub fn terminalWidthColumns() usize {
+    if (builtin.os.tag == .windows) {
+        const stdout_handle = windows.GetStdHandle(windows.STD_OUTPUT_HANDLE) catch return 120;
+
+        var csbi: windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
+        if (windows.kernel32.GetConsoleScreenBufferInfo(stdout_handle, &csbi) != 0) {
+            const width_i32 = @as(i32, csbi.srWindow.Right) - @as(i32, csbi.srWindow.Left) + 1;
+            if (width_i32 > 0) return @intCast(width_i32);
+        }
+    }
+
+    return 120;
+}
+
+pub fn truncateWithEllipsis(text: []const u8, out_buf: []u8, max_visible_chars: usize) []const u8 {
+    if (max_visible_chars == 0) return "";
+    if (text.len <= max_visible_chars) return text;
+
+    if (max_visible_chars <= 3) {
+        const keep = @min(max_visible_chars, out_buf.len);
+        if (keep == 0) return "";
+        @memcpy(out_buf[0..keep], text[0..keep]);
+        return out_buf[0..keep];
+    }
+
+    const head = @min(max_visible_chars - 3, out_buf.len - 3);
+    if (head == 0) return "";
+
+    @memcpy(out_buf[0..head], text[0..head]);
+    out_buf[head + 0] = '.';
+    out_buf[head + 1] = '.';
+    out_buf[head + 2] = '.';
+    return out_buf[0 .. head + 3];
+}
+
 pub fn printProgressBar(percent: u32, label: []const u8) void {
-    const bar_width: u32 = 30;
+    const columns = terminalWidthColumns();
+    const safe_columns = if (columns < 20) 20 else columns;
+
+    const fixed_visible = 2 + label.len + 2 + 6;
+    const available_for_bar = if (safe_columns > fixed_visible)
+        safe_columns - fixed_visible
+    else
+        8;
+    const bar_width: u32 = @intCast(@max(@as(usize, 8), @min(available_for_bar, 40)));
+
     const filled = (percent * bar_width) / 100;
     const empty = bar_width - filled;
 

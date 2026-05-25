@@ -52,8 +52,8 @@ pub fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
 
     if (state.has_rendered_progress) {
         // We now render 1 status line, 1 progress bar, and 6 metric lines = 8 lines total.
-        // We go up 8 lines to overwrite the previous render cleanly.
-        std.debug.print("\x1b[8F", .{});
+        // We go up 7 lines to overwrite the previous render cleanly.
+        std.debug.print("\x1b[7F", .{});
     } else {
         state.has_rendered_progress = true;
     }
@@ -94,11 +94,17 @@ pub fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
     else
         @as(u32, if (processed_effective > 0) 1 else 0);
 
+    const columns = ui.terminalWidthColumns();
+    const status_prefix_len = "  Carpeta: ".len;
+    const status_max = if (columns > status_prefix_len) columns - status_prefix_len else 0;
+    var status_buf: [512]u8 = undefined;
+    const safe_status = ui.truncateWithEllipsis(current_status, &status_buf, status_max);
+
     // 1st line: Status / Folder
-    std.debug.print("\r\x1b[2K  \x1b[90mCarpeta:\x1b[0m {s}\n", .{current_status});
+    std.debug.print("\r\x1b[2K  \x1b[90mCarpeta:\x1b[0m {s}\n", .{safe_status});
 
     // 2nd line: Progress Bar (ui.printProgressBar prints \r\x1b[2K internally and appends no newline)
-    ui.printProgressBar(percent_effective, "  Importando");
+    ui.printProgressBar(percent_effective, "Importando");
 
     const elapsed_sec = @divTrunc(elapsed_ms, 1000);
     const elapsed_parts = ui.secondsToHms(elapsed_sec);
@@ -115,13 +121,13 @@ pub fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
         }
     }
 
-    // 3rd to 8th line: Metric details (each has \x1b[2K to clear any leftover characters)
-    std.debug.print("\n\x1b[2K  \x1b[90mProcesados:\x1b[0m     {d} ({s})", .{ processed_effective, size_str });
-    std.debug.print("\n\x1b[2K  \x1b[90mCopiados:\x1b[0m        {d}", .{state.copied});
-    std.debug.print("\n\x1b[2K  \x1b[90mMovidos:\x1b[0m         {d}", .{state.moved});
-    std.debug.print("\n\x1b[2K  \x1b[90mOmitidos:\x1b[0m        {d}", .{state.skipped + state.failed});
-    std.debug.print("\n\x1b[2K  \x1b[90mRestantes:\x1b[0m       {d}", .{remaining_effective});
-    std.debug.print("\n\x1b[2K  \x1b[90mTranscurrido:\x1b[0m    {d:0>2}:{d:0>2}:{d:0>2}", .{
+    // 3rd to 8th line: Metric details (compact labels reduce wrapping after window resize)
+    std.debug.print("\n\x1b[2K  \x1b[90mProc:\x1b[0m {d} ({s})", .{ processed_effective, size_str });
+    std.debug.print("\n\x1b[2K  \x1b[90mCop:\x1b[0m  {d}", .{state.copied});
+    std.debug.print("\n\x1b[2K  \x1b[90mMov:\x1b[0m  {d}", .{state.moved});
+    std.debug.print("\n\x1b[2K  \x1b[90mOmi:\x1b[0m  {d}", .{state.skipped + state.failed});
+    std.debug.print("\n\x1b[2K  \x1b[90mRes:\x1b[0m  {d}", .{remaining_effective});
+    std.debug.print("\n\x1b[2K  \x1b[90mT:\x1b[0m {d:0>2}:{d:0>2}:{d:0>2}", .{
         elapsed_parts.hours,
         elapsed_parts.minutes,
         elapsed_parts.seconds,
@@ -142,7 +148,7 @@ pub fn onImportScriptLine(ctx: *anyopaque, line: []const u8) void {
     } else if (percent_effective >= 100) {
         eta_str = "00:00:00";
     }
-    std.debug.print("  \x1b[90m| ETA:\x1b[0m {s}", .{eta_str});
+    std.debug.print("  \x1b[90mETA:\x1b[0m {s}", .{eta_str});
     std.debug.print("\r", .{});
 }
 
