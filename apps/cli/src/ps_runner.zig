@@ -9,6 +9,7 @@ pub const ScriptId = enum {
 pub const ScriptRunResult = struct {
     output: []u8,
     command_line: []u8,
+    exit_code: u32 = 0,
 };
 
 pub const LineCallback = *const fn (ctx: *anyopaque, line: []const u8) void;
@@ -91,10 +92,31 @@ pub fn runScriptDetailedStreaming(
     callback: ?LineCallback,
     callback_ctx: ?*anyopaque,
 ) !ScriptRunResult {
-    return runScriptWithHostDetailed(allocator, "pwsh", script_path, args, callback, callback_ctx) catch |err| switch (err) {
-        error.FileNotFound => runScriptWithHostDetailed(allocator, "powershell.exe", script_path, args, callback, callback_ctx),
+    return runScriptWithHostDetailed(allocator, "powershell.exe", script_path, args, callback, callback_ctx) catch |err| switch (err) {
+        error.FileNotFound => runScriptWithHostDetailed(allocator, "pwsh", script_path, args, callback, callback_ctx),
         else => err,
     };
+}
+
+pub fn buildCommandPreview(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    script_path: []const u8,
+    args: []const []const u8,
+) ![]u8 {
+    var argv = std.ArrayListUnmanaged([]const u8){};
+    defer argv.deinit(allocator);
+
+    try argv.appendSlice(allocator, &.{
+        host,
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        script_path,
+    });
+    try argv.appendSlice(allocator, args);
+
+    return formatCommandLine(allocator, argv.items);
 }
 
 fn runScriptWithHostDetailed(
@@ -126,15 +148,13 @@ fn runScriptWithHostDetailed(
 
     var child = std.process.Child.init(argv.items, allocator);
     child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
 
     try child.spawn();
 
     // Read all stdout
     var stdout_list = std.ArrayListUnmanaged(u8){};
     defer stdout_list.deinit(allocator);
-    var stderr_list = std.ArrayListUnmanaged(u8){};
-    defer stderr_list.deinit(allocator);
     var pending_line = std.ArrayListUnmanaged(u8){};
     defer pending_line.deinit(allocator);
 
@@ -168,44 +188,21 @@ fn runScriptWithHostDetailed(
         }
     }
 
-    if (child.stderr) |stderr_file| {
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = stderr_file.read(&buf) catch break;
-            if (n == 0) break;
-            try stderr_list.appendSlice(allocator, buf[0..n]);
-        }
-    }
-
-    _ = child.wait() catch {
+    const term = child.wait() catch {
         return error.ProcessFailed;
     };
-
-    if (stdout_list.items.len == 0 and stderr_list.items.len > 0) {
-        return .{
-            .output = try allocator.dupe(u8, stderr_list.items),
-            .command_line = command_line,
-        };
+    var exit_code: u32 = 0;
+    switch (term) {
+        .Exited => |code| {
+            exit_code = code;
+        },
+        else => return error.ProcessFailed,
     }
-
-    if (stderr_list.items.len == 0) {
-        return .{
-            .output = try allocator.dupe(u8, stdout_list.items),
-            .command_line = command_line,
-        };
-    }
-
-    var merged = std.ArrayListUnmanaged(u8){};
-    defer merged.deinit(allocator);
-    try merged.appendSlice(allocator, stdout_list.items);
-    if (stdout_list.items.len > 0 and stdout_list.items[stdout_list.items.len - 1] != '\n') {
-        try merged.append(allocator, '\n');
-    }
-    try merged.appendSlice(allocator, stderr_list.items);
 
     return .{
-        .output = try allocator.dupe(u8, merged.items),
+        .output = try allocator.dupe(u8, stdout_list.items),
         .command_line = command_line,
+        .exit_code = exit_code,
     };
 }
 

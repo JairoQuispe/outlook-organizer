@@ -123,12 +123,25 @@ pub fn executeImport(allocator: std.mem.Allocator, config: types.ImportConfig) !
     defer allocator.free(script_run.command_line);
     defer allocator.free(script_run.output);
 
-    std.debug.print("  \x1b[90mComando:\x1b[0m {s}\n\n", .{script_run.command_line});
+    std.debug.print("  \x1b[90mComando final:\x1b[0m {s}\n", .{script_run.command_line});
+    std.debug.print("  \x1b[90mExit code:\x1b[0m {d}\n\n", .{script_run.exit_code});
     std.debug.print("\n", .{});
 
     const output = script_run.output;
 
     const elapsed_total = std.time.milliTimestamp() - start_time;
+
+    if (script_run.exit_code != 0) {
+        ui.printError("El script de importacion finalizo con error.");
+        if (output.len > 0) {
+            std.debug.print("\n  \x1b[91mSalida del script:\x1b[0m\n", .{});
+            std.debug.print("  {s}\n", .{output});
+        } else {
+            std.debug.print("  \x1b[90mSin salida capturada en stdout.\x1b[0m\n", .{});
+        }
+        ui.waitForEnter();
+        return;
+    }
 
     const parsed_output = result_parser.parseImportOutput(output);
 
