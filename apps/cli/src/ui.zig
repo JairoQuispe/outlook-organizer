@@ -28,6 +28,63 @@ pub const MenuChoice = enum {
     exit,
 };
 
+pub const MenuInput = union(enum) {
+    up,
+    down,
+    left,
+    right,
+    enter,
+    cancel,
+    key: u8,
+};
+
+pub fn readMenuInput(cursor: *usize, item_count: usize) !MenuInput {
+    const input = try readSingleKey();
+
+    const nav = switch (input) {
+        'q', 'Q' => MenuInput{ .cancel = {} },
+        'w', 'W', 'k', 'K' => MenuInput{ .up = {} },
+        's', 'S', 'j', 'J' => MenuInput{ .down = {} },
+        '\r', '\n' => MenuInput{ .enter = {} },
+        27 => blk: {
+            const seq1 = readSingleKey() catch return MenuInput{ .key = input };
+            if (seq1 != '[' and seq1 != 'O') return MenuInput{ .key = input };
+
+            const seq2 = readSingleKey() catch return MenuInput{ .key = input };
+            break :blk switch (seq2) {
+                'A' => MenuInput{ .up = {} },
+                'B' => MenuInput{ .down = {} },
+                'C' => MenuInput{ .right = {} },
+                'D' => MenuInput{ .left = {} },
+                else => MenuInput{ .key = input },
+            };
+        },
+        0, 224 => blk: {
+            const ext = readSingleKey() catch return MenuInput{ .key = input };
+            break :blk switch (ext) {
+                72 => MenuInput{ .up = {} },
+                80 => MenuInput{ .down = {} },
+                77 => MenuInput{ .right = {} },
+                75 => MenuInput{ .left = {} },
+                else => MenuInput{ .key = input },
+            };
+        },
+        else => MenuInput{ .key = input },
+    };
+
+    switch (nav) {
+        .up => {
+            if (cursor.* > 0) cursor.* -= 1;
+        },
+        .down => {
+            if (cursor.* + 1 < item_count) cursor.* += 1;
+        },
+        else => {},
+    }
+
+    return nav;
+}
+
 pub fn clearScreen() void {
     // ANSI escape: clear screen + move cursor to top-left
     std.debug.print("\x1b[2J\x1b[H", .{});
@@ -235,6 +292,16 @@ pub fn waitForEnter() void {
     std.debug.print("\n  \x1b[90mPresiona Enter para continuar...\x1b[0m", .{});
     var buf: [64]u8 = undefined;
     _ = readStdinLine(&buf) catch {};
+}
+
+pub fn failAbort(msg: []const u8) void {
+    printError(msg);
+    waitForEnter();
+}
+
+pub fn cancelAbort() void {
+    std.debug.print("\n  \x1b[90mOperacion cancelada.\x1b[0m\n", .{});
+    waitForEnter();
 }
 
 fn readStdinLine(buf: []u8) !?[]u8 {

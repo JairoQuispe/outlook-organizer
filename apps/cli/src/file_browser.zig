@@ -164,232 +164,33 @@ pub fn selectPstFile(allocator: std.mem.Allocator) ![]u8 {
                 std.debug.print("\n  \x1b[90m... y {d} mas\x1b[0m\n", .{total_rows - end});
             }
 
-            const key = ui.readSingleKey() catch continue;
-            switch (key) {
-                'q', 'Q' => return error.Cancelled,
-                'w', 'W', 'k', 'K' => {
-                    if (cursor > 0) cursor -= 1;
-                },
-                's', 'S', 'j', 'J' => {
-                    if (cursor + 1 < total_rows) cursor += 1;
-                },
-                'p', 'P' => {
-                    std.debug.print("\n  \x1b[33mRuta absoluta de archivo PST o carpeta:\x1b[0m ", .{});
-                    const input = ui.readLine(allocator) catch continue;
-                    defer allocator.free(input);
-
-                    if (input.len == 0) continue;
-
-                    if (isPstFile(input)) {
-                        const stat = std.fs.cwd().statFile(input) catch {
-                            _ = std.fs.openFileAbsolute(input, .{}) catch {
-                                ui.printError("Archivo no encontrado");
-                                ui.waitForEnter();
-                                continue;
-                            };
-                            return try allocator.dupe(u8, input);
-                        };
-                        _ = stat;
-                        return try allocator.dupe(u8, input);
-                    }
-
-                    var test_dir = std.fs.openDirAbsolute(input, .{}) catch {
-                        ui.printError("Ruta no valida");
-                        ui.waitForEnter();
-                        continue;
-                    };
-                    test_dir.close();
-
-                    @memcpy(current_path_buf[0..input.len], input);
-                    current_path = current_path_buf[0..input.len];
-                    browsing_drives = false;
-                    break :browse_loop;
-                },
-                '\r', '\n' => {
-                    if (has_parent_row and cursor == 0) {
-                        if (std.fs.path.dirname(current_path)) |parent| {
-                            @memcpy(current_path_buf[0..parent.len], parent);
-                            current_path = current_path_buf[0..parent.len];
-                            browsing_drives = false;
-                        } else if (isDriveRoot(current_path)) {
-                            browsing_drives = true;
+            const input = ui.readMenuInput(&cursor, total_rows) catch continue;
+            switch (input) {
+                .cancel => return error.Cancelled,
+                .key => |key| switch (key) {
+                    'p', 'P' => {
+                        if (try handleManualPathInput(allocator, current_path_buf[0..], &current_path, &browsing_drives)) |selected_path| {
+                            return selected_path;
                         }
                         break :browse_loop;
-                    }
-
-                    const selected_idx = if (has_parent_row) cursor - 1 else cursor;
-                    const selected = entries.items[selected_idx];
-                    if (selected.is_dir) {
-                        if (browsing_drives) {
-                            @memcpy(current_path_buf[0..selected.name.len], selected.name);
-                            current_path = current_path_buf[0..selected.name.len];
-                            browsing_drives = false;
-                            break :browse_loop;
-                        }
-
-                        const new_path = std.fs.path.join(allocator, &.{ current_path, selected.name }) catch {
-                            ui.printError("Error construyendo ruta");
-                            ui.waitForEnter();
-                            continue;
-                        };
-                        defer allocator.free(new_path);
-                        @memcpy(current_path_buf[0..new_path.len], new_path);
-                        current_path = current_path_buf[0..new_path.len];
-                        browsing_drives = false;
+                    },
+                    8 => {
+                        if (browsing_drives) continue;
+                        goToParentOrDrives(current_path_buf[0..], &current_path, &browsing_drives);
                         break :browse_loop;
-                    }
-
-                    const full_path = std.fs.path.join(allocator, &.{ current_path, selected.name }) catch {
-                        ui.printError("Error construyendo ruta");
-                        ui.waitForEnter();
-                        continue;
-                    };
-                    return full_path;
+                    },
+                    else => {},
                 },
-                8 => {
-                    if (browsing_drives) continue;
-
-                    if (std.fs.path.dirname(current_path)) |parent| {
-                        @memcpy(current_path_buf[0..parent.len], parent);
-                        current_path = current_path_buf[0..parent.len];
-                        browsing_drives = false;
-                    } else if (isDriveRoot(current_path)) {
-                        browsing_drives = true;
+                .enter, .right => {
+                    var selected_path: ?[]u8 = null;
+                    if (try activateSelection(allocator, current_path_buf[0..], &current_path, &browsing_drives, entries.items, has_parent_row, cursor, &selected_path)) {
+                        return selected_path.?;
                     }
                     break :browse_loop;
                 },
-                27 => {
-                    const seq1 = ui.readSingleKey() catch continue;
-                    if (seq1 != '[' and seq1 != 'O') continue;
-
-                    const seq2 = ui.readSingleKey() catch continue;
-                    switch (seq2) {
-                        'A' => {
-                            if (cursor > 0) cursor -= 1;
-                        },
-                        'B' => {
-                            if (cursor + 1 < total_rows) cursor += 1;
-                        },
-                        'D' => {
-                            if (browsing_drives) continue;
-
-                            if (std.fs.path.dirname(current_path)) |parent| {
-                                @memcpy(current_path_buf[0..parent.len], parent);
-                                current_path = current_path_buf[0..parent.len];
-                                browsing_drives = false;
-                            } else if (isDriveRoot(current_path)) {
-                                browsing_drives = true;
-                            }
-                            break :browse_loop;
-                        },
-                        'C' => {
-                            if (has_parent_row and cursor == 0) {
-                                if (std.fs.path.dirname(current_path)) |parent| {
-                                    @memcpy(current_path_buf[0..parent.len], parent);
-                                    current_path = current_path_buf[0..parent.len];
-                                    browsing_drives = false;
-                                } else if (isDriveRoot(current_path)) {
-                                    browsing_drives = true;
-                                }
-                                break :browse_loop;
-                            }
-
-                            const selected_idx = if (has_parent_row) cursor - 1 else cursor;
-                            const selected = entries.items[selected_idx];
-                            if (selected.is_dir) {
-                                if (browsing_drives) {
-                                    @memcpy(current_path_buf[0..selected.name.len], selected.name);
-                                    current_path = current_path_buf[0..selected.name.len];
-                                    browsing_drives = false;
-                                    break :browse_loop;
-                                }
-
-                                const new_path = std.fs.path.join(allocator, &.{ current_path, selected.name }) catch {
-                                    ui.printError("Error construyendo ruta");
-                                    ui.waitForEnter();
-                                    continue;
-                                };
-                                defer allocator.free(new_path);
-                                @memcpy(current_path_buf[0..new_path.len], new_path);
-                                current_path = current_path_buf[0..new_path.len];
-                                browsing_drives = false;
-                                break :browse_loop;
-                            }
-
-                            const full_path = std.fs.path.join(allocator, &.{ current_path, selected.name }) catch {
-                                ui.printError("Error construyendo ruta");
-                                ui.waitForEnter();
-                                continue;
-                            };
-                            return full_path;
-                        },
-                        else => {},
-                    }
-                },
-                0, 224 => {
-                    const ext = ui.readSingleKey() catch continue;
-                    switch (ext) {
-                        72 => {
-                            if (cursor > 0) cursor -= 1;
-                        },
-                        80 => {
-                            if (cursor + 1 < total_rows) cursor += 1;
-                        },
-                        75 => {
-                            if (browsing_drives) continue;
-
-                            if (std.fs.path.dirname(current_path)) |parent| {
-                                @memcpy(current_path_buf[0..parent.len], parent);
-                                current_path = current_path_buf[0..parent.len];
-                                browsing_drives = false;
-                            } else if (isDriveRoot(current_path)) {
-                                browsing_drives = true;
-                            }
-                            break :browse_loop;
-                        },
-                        77 => {
-                            if (has_parent_row and cursor == 0) {
-                                if (std.fs.path.dirname(current_path)) |parent| {
-                                    @memcpy(current_path_buf[0..parent.len], parent);
-                                    current_path = current_path_buf[0..parent.len];
-                                    browsing_drives = false;
-                                } else if (isDriveRoot(current_path)) {
-                                    browsing_drives = true;
-                                }
-                                break :browse_loop;
-                            }
-
-                            const selected_idx = if (has_parent_row) cursor - 1 else cursor;
-                            const selected = entries.items[selected_idx];
-                            if (selected.is_dir) {
-                                if (browsing_drives) {
-                                    @memcpy(current_path_buf[0..selected.name.len], selected.name);
-                                    current_path = current_path_buf[0..selected.name.len];
-                                    browsing_drives = false;
-                                    break :browse_loop;
-                                }
-
-                                const new_path = std.fs.path.join(allocator, &.{ current_path, selected.name }) catch {
-                                    ui.printError("Error construyendo ruta");
-                                    ui.waitForEnter();
-                                    continue;
-                                };
-                                defer allocator.free(new_path);
-                                @memcpy(current_path_buf[0..new_path.len], new_path);
-                                current_path = current_path_buf[0..new_path.len];
-                                browsing_drives = false;
-                                break :browse_loop;
-                            }
-
-                            const full_path = std.fs.path.join(allocator, &.{ current_path, selected.name }) catch {
-                                ui.printError("Error construyendo ruta");
-                                ui.waitForEnter();
-                                continue;
-                            };
-                            return full_path;
-                        },
-                        else => {},
-                    }
+                .left => {
+                    goToParentOrDrives(current_path_buf[0..], &current_path, &browsing_drives);
+                    break :browse_loop;
                 },
                 else => {},
             }
@@ -411,4 +212,95 @@ fn isPstFile(name: []const u8) bool {
         std.ascii.toLower(ext[1]) == 'p' and
         std.ascii.toLower(ext[2]) == 's' and
         std.ascii.toLower(ext[3]) == 't');
+}
+
+fn goToParentOrDrives(current_path_buf: []u8, current_path: *[]u8, browsing_drives: *bool) void {
+    if (std.fs.path.dirname(current_path.*)) |parent| {
+        @memcpy(current_path_buf[0..parent.len], parent);
+        current_path.* = current_path_buf[0..parent.len];
+        browsing_drives.* = false;
+    } else if (isDriveRoot(current_path.*)) {
+        browsing_drives.* = true;
+    }
+}
+
+fn enterAbsoluteDirectory(current_path_buf: []u8, current_path: *[]u8, browsing_drives: *bool, absolute_path: []const u8) void {
+    @memcpy(current_path_buf[0..absolute_path.len], absolute_path);
+    current_path.* = current_path_buf[0..absolute_path.len];
+    browsing_drives.* = false;
+}
+
+fn handleManualPathInput(
+    allocator: std.mem.Allocator,
+    current_path_buf: []u8,
+    current_path: *[]u8,
+    browsing_drives: *bool,
+) !?[]u8 {
+    std.debug.print("\n  \x1b[33mRuta absoluta de archivo PST o carpeta:\x1b[0m ", .{});
+    const manual_input = ui.readLine(allocator) catch return null;
+    defer allocator.free(manual_input);
+
+    if (manual_input.len == 0) return null;
+
+    if (isPstFile(manual_input)) {
+        const stat = std.fs.cwd().statFile(manual_input) catch {
+            _ = std.fs.openFileAbsolute(manual_input, .{}) catch {
+                ui.printError("Archivo no encontrado");
+                ui.waitForEnter();
+                return null;
+            };
+            return try allocator.dupe(u8, manual_input);
+        };
+        _ = stat;
+        return try allocator.dupe(u8, manual_input);
+    }
+
+    var test_dir = std.fs.openDirAbsolute(manual_input, .{}) catch {
+        ui.printError("Ruta no valida");
+        ui.waitForEnter();
+        return null;
+    };
+    test_dir.close();
+
+    enterAbsoluteDirectory(current_path_buf, current_path, browsing_drives, manual_input);
+    return null;
+}
+
+fn activateSelection(
+    allocator: std.mem.Allocator,
+    current_path_buf: []u8,
+    current_path: *[]u8,
+    browsing_drives: *bool,
+    entries: []const DirEntry,
+    has_parent_row: bool,
+    cursor: usize,
+    selected_path: *?[]u8,
+) !bool {
+    if (has_parent_row and cursor == 0) {
+        goToParentOrDrives(current_path_buf, current_path, browsing_drives);
+        return false;
+    }
+
+    const selected_idx = if (has_parent_row) cursor - 1 else cursor;
+    const selected = entries[selected_idx];
+    if (selected.is_dir) {
+        if (browsing_drives.*) {
+            enterAbsoluteDirectory(current_path_buf, current_path, browsing_drives, selected.name);
+            return false;
+        }
+
+        const new_path = std.fs.path.join(allocator, &.{ current_path.*, selected.name }) catch {
+            ui.printError("Error construyendo ruta");
+            ui.waitForEnter();
+            return false;
+        };
+        defer allocator.free(new_path);
+        @memcpy(current_path_buf[0..new_path.len], new_path);
+        current_path.* = current_path_buf[0..new_path.len];
+        browsing_drives.* = false;
+        return false;
+    }
+
+    selected_path.* = try std.fs.path.join(allocator, &.{ current_path.*, selected.name });
+    return true;
 }

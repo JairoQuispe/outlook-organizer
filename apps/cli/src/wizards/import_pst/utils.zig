@@ -1,16 +1,27 @@
 const std = @import("std");
+const types = @import("types.zig");
 
-pub fn extractNumber(json: []const u8, key: []const u8) ?i64 {
+fn isWhitespace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r' or c == '\n';
+}
+
+fn findJsonValueStart(json: []const u8, key: []const u8) ?usize {
     var search_buf: [128]u8 = undefined;
-    const search = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
+    const search = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{key}) catch return null;
     const key_pos = std.mem.indexOf(u8, json, search) orelse return null;
     var pos = key_pos + search.len;
 
-    // Skip whitespace (just in case)
-    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
-    if (pos >= json.len) return null;
+    while (pos < json.len and isWhitespace(json[pos])) : (pos += 1) {}
+    if (pos >= json.len or json[pos] != ':') return null;
+    pos += 1;
 
-    // Read number (may have minus sign)
+    while (pos < json.len and isWhitespace(json[pos])) : (pos += 1) {}
+    if (pos >= json.len) return null;
+    return pos;
+}
+
+pub fn extractNumber(json: []const u8, key: []const u8) ?i64 {
+    const pos = findJsonValueStart(json, key) orelse return null;
     var end = pos;
     if (end < json.len and json[end] == '-') end += 1;
     while (end < json.len and json[end] >= '0' and json[end] <= '9') : (end += 1) {}
@@ -20,18 +31,22 @@ pub fn extractNumber(json: []const u8, key: []const u8) ?i64 {
 }
 
 pub fn extractString(json: []const u8, key: []const u8) ?[]const u8 {
-    var search_buf: [128]u8 = undefined;
-    const search = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
-    const start_pos = std.mem.indexOf(u8, json, search) orelse return null;
-    const pos = start_pos + search.len;
-
-    var end = pos;
+    const pos = findJsonValueStart(json, key) orelse return null;
+    if (json[pos] != '"') return null;
+    var end = pos + 1;
     while (end < json.len) : (end += 1) {
-        if (json[end] == '"' and (end == pos or json[end - 1] != '\\')) {
-            return json[pos..end];
+        if (json[end] == '"' and (end == pos + 1 or json[end - 1] != '\\')) {
+            return json[pos + 1 .. end];
         }
     }
     return null;
+}
+
+pub fn findEnclosingObject(buffer: []const u8, key_pos: usize) ?[]const u8 {
+    const obj_start = std.mem.lastIndexOfScalar(u8, buffer[0 .. key_pos + 1], '{') orelse return null;
+    const obj_end = std.mem.indexOfScalarPos(u8, buffer, key_pos, '}') orelse return null;
+    if (obj_end <= obj_start) return null;
+    return buffer[obj_start .. obj_end + 1];
 }
 
 pub fn extractYearBreakdownDisplay(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
@@ -99,6 +114,36 @@ pub fn cleanupTempFile(path: []const u8) void {
     }
 }
 
+pub fn storeTypeDisplayName(store_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, store_type, "ExchangeOnline")) return "Exchange Online";
+    if (std.mem.eql(u8, store_type, "OST")) return "OST";
+    if (std.mem.eql(u8, store_type, "PST")) return "PST";
+    return if (store_type.len > 0) store_type else "Desconocido";
+}
+
+pub fn profileDisplayName(profile_name: ?[]const u8) []const u8 {
+    return if (profile_name) |p|
+        if (p.len > 0) p else "Perfil predeterminado"
+    else
+        "Perfil predeterminado";
+}
+
+pub fn countAssignedMappings(mappings: ?[]const types.TargetStoreMapping) usize {
+    const items = mappings orelse return 0;
+    var count: usize = 0;
+    for (items) |m| {
+        if (m.store_id.len > 0) count += 1;
+    }
+    return count;
+}
+
+pub fn routingCriterionDisplay(criterion: types.RoutingCriterion) []const u8 {
+    return if (criterion == .by_year)
+        "Múltiples buzones agrupados por Años"
+    else
+        "Múltiples buzones agrupados por Meses";
+}
+
 pub fn appendJsonEscaped(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8), value: []const u8) !void {
     for (value) |ch| {
         switch (ch) {
@@ -110,4 +155,37 @@ pub fn appendJsonEscaped(allocator: std.mem.Allocator, list: *std.ArrayListUnman
             else => try list.append(allocator, ch),
         }
     }
+}
+
+pub fn freeTargetStoreMappings(allocator: std.mem.Allocator, mappings: []const types.TargetStoreMapping) void {
+    for (mappings) |m| {
+        m.deinit(allocator);
+    }
+    allocator.free(mappings);
+}
+
+pub fn formatBytesShort(buf: []u8, bytes: i64) []const u8 {
+    if (bytes <= 0) return "0 Bytes";
+
+    const gb = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
+    if (gb >= 0.1) {
+        return std.fmt.bufPrint(buf, "{d:.2} GB", .{gb}) catch "Error";
+    }
+
+    const mb = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0);
+    return std.fmt.bufPrint(buf, "{d:.2} MB", .{mb}) catch "Error";
+}
+
+pub fn formatBytesShortFromU64(buf: []u8, bytes: u64) []const u8 {
+    const i = std.math.cast(i64, bytes) orelse return "Error";
+    return formatBytesShort(buf, i);
+}
+
+pub fn formatHms(buf: []u8, total_seconds: i64) []const u8 {
+    const safe = @max(total_seconds, 0);
+    const hours = @divTrunc(safe, 3600);
+    const rem = @rem(safe, 3600);
+    const minutes = @divTrunc(rem, 60);
+    const seconds = @rem(rem, 60);
+    return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hours, minutes, seconds }) catch "--:--:--";
 }

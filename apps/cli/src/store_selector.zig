@@ -115,43 +115,10 @@ pub fn selectTargetStore(allocator: std.mem.Allocator, profile_name: ?[]const u8
             std.debug.print("\n  \x1b[90m... y {d} mas\x1b[0m\n", .{stores.items.len - end});
         }
 
-        const key = ui.readSingleKey() catch continue;
-        switch (key) {
-            'q', 'Q' => return error.Cancelled,
-            'w', 'W', 'k', 'K' => {
-                if (cursor > 0) cursor -= 1;
-            },
-            's', 'S', 'j', 'J' => {
-                if (cursor + 1 < stores.items.len) cursor += 1;
-            },
-            '\r', '\n' => break,
-            27 => {
-                const seq1 = ui.readSingleKey() catch continue;
-                if (seq1 != '[' and seq1 != 'O') continue;
-
-                const seq2 = ui.readSingleKey() catch continue;
-                switch (seq2) {
-                    'A' => {
-                        if (cursor > 0) cursor -= 1;
-                    },
-                    'B' => {
-                        if (cursor + 1 < stores.items.len) cursor += 1;
-                    },
-                    else => {},
-                }
-            },
-            0, 224 => {
-                const ext = ui.readSingleKey() catch continue;
-                switch (ext) {
-                    72 => {
-                        if (cursor > 0) cursor -= 1;
-                    },
-                    80 => {
-                        if (cursor + 1 < stores.items.len) cursor += 1;
-                    },
-                    else => {},
-                }
-            },
+        const input = ui.readMenuInput(&cursor, stores.items.len) catch continue;
+        switch (input) {
+            .cancel => return error.Cancelled,
+            .enter => break,
             else => {},
         }
     }

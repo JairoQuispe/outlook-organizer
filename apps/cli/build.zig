@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    if (optimize != .Debug) {
+        root_mod.strip = true;
+        root_mod.single_threaded = true;
+    }
+
     const exe = b.addExecutable(.{
         .name = "outlook-organizer-cli",
         .root_module = root_mod,

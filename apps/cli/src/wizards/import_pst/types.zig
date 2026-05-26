@@ -11,6 +11,12 @@ pub const TargetStoreMapping = struct {
     store_id: []const u8,
     store_name: []const u8,
     store_type: []const u8,
+
+    pub fn deinit(self: TargetStoreMapping, allocator: std.mem.Allocator) void {
+        allocator.free(self.store_id);
+        allocator.free(self.store_name);
+        allocator.free(self.store_type);
+    }
 };
 
 pub const ScanMode = enum {

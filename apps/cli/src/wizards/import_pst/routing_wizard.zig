@@ -2,70 +2,8 @@ const std = @import("std");
 const ui = @import("../../ui.zig");
 const store_selector = @import("../../store_selector.zig");
 const types = @import("types.zig");
-
-pub fn selectRoutingCriterion() !types.RoutingCriterion {
-    var cursor: usize = 0;
-    const labels = [_][]const u8{
-        "Agrupado por Anos  (Ej: 2023 -> Buzon A, 2024 -> Buzon B)",
-        "Agrupado por Meses (Ej: Enero 2024 -> Buzon A, Febrero 2024 -> Buzon B)",
-    };
-
-    while (true) {
-        ui.clearScreen();
-        ui.printSectionTitle("Criterio de Enrutamiento");
-        std.debug.print("  \x1b[90mSelecciona como deseas agrupar los correos para enviarlos a diferentes buzones.\x1b[0m\n", .{});
-        std.debug.print("  \x1b[90m↑/↓ mover | Enter confirmar | Q cancelar\x1b[0m\n\n", .{});
-
-        for (labels, 0..) |label, idx| {
-            const is_current = idx == cursor;
-            if (is_current) std.debug.print("  \x1b[7m", .{});
-            std.debug.print("  {s}\n", .{label});
-            if (is_current) std.debug.print("  \x1b[0m", .{});
-        }
-
-        const key = ui.readSingleKey() catch continue;
-        switch (key) {
-            'q', 'Q' => return error.Cancelled,
-            'w', 'W', 'k', 'K' => {
-                if (cursor > 0) cursor -= 1;
-            },
-            's', 'S', 'j', 'J' => {
-                if (cursor + 1 < labels.len) cursor += 1;
-            },
-            '\r', '\n' => {
-                return if (cursor == 0) .by_year else .by_month;
-            },
-            27 => {
-                const seq1 = ui.readSingleKey() catch continue;
-                if (seq1 != '[' and seq1 != 'O') continue;
-
-                const seq2 = ui.readSingleKey() catch continue;
-                switch (seq2) {
-                    'A' => {
-                        if (cursor > 0) cursor -= 1;
-                    },
-                    'B' => {
-                        if (cursor + 1 < labels.len) cursor += 1;
-                    },
-                    else => {},
-                }
-            },
-            0, 224 => {
-                const ext = ui.readSingleKey() catch continue;
-                switch (ext) {
-                    72 => {
-                        if (cursor > 0) cursor -= 1;
-                    },
-                    80 => {
-                        if (cursor + 1 < labels.len) cursor += 1;
-                    },
-                    else => {},
-                }
-            },
-            else => {},
-        }
-    }
-}
+const utils = @import("utils.zig");
+const menu_ui = @import("menu_ui.zig");
 
 pub const TempRoutingSelection = struct {
     year: i32,
@@ -73,196 +11,19 @@ pub const TempRoutingSelection = struct {
     selected: bool,
 };
 
-pub fn configureMappings(
-    allocator: std.mem.Allocator,
-    criterion: types.RoutingCriterion,
-    folders_json_path: []const u8,
-    profile_name: ?[]const u8,
-) ![]types.TargetStoreMapping {
-    // 1. Leer el archivo JSON para saber qué años y meses hay disponibles
-    const items_found = try parseAvailableDates(allocator, folders_json_path);
-    defer {
-        for (items_found) |item| {
-            _ = item;
-        }
-        allocator.free(items_found);
-    }
-
-    if (items_found.len == 0) {
-        ui.printError("No se encontraron correos con fecha en el escaneo previo para enrutar.");
-        ui.waitForEnter();
-        return error.NoDataToRoute;
-    }
-
-    // 2. Generar la lista de opciones según el criterio
-    var options = std.ArrayListUnmanaged(types.TargetStoreMapping){};
-    errdefer {
-        for (options.items) |opt| {
-            allocator.free(opt.store_id);
-            allocator.free(opt.store_name);
-            allocator.free(opt.store_type);
-        }
-        options.deinit(allocator);
-    }
-
-    if (criterion == .by_year) {
-        // Encontrar años únicos
-        var years = std.ArrayListUnmanaged(i32){};
-        defer years.deinit(allocator);
-        for (items_found) |it| {
-            var exists = false;
-            for (years.items) |y| {
-                if (y == it.year) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) {
-                try years.append(allocator, it.year);
-            }
-        }
-        // Ordenar años de forma descendente
-        std.sort.pdq(i32, years.items, {}, std.sort.desc(i32));
-
-        for (years.items) |year| {
-            try options.append(allocator, .{
-                .year = year,
-                .month = null,
-                .store_id = try allocator.dupe(u8, ""),
-                .store_name = try allocator.dupe(u8, "Sin asignar (se omitira)"),
-                .store_type = try allocator.dupe(u8, ""),
-            });
-        }
-    } else {
-        // Ordenar items por año desc, mes desc
-        std.sort.pdq(DateItem, items_found, {}, compareDateItemsDesc);
-
-        for (items_found) |it| {
-            try options.append(allocator, .{
-                .year = it.year,
-                .month = it.month,
-                .store_id = try allocator.dupe(u8, ""),
-                .store_name = try allocator.dupe(u8, "Sin asignar (se omitira)"),
-                .store_type = try allocator.dupe(u8, ""),
-            });
-        }
-    }
-
-    // 3. Menú interactivo para mapear cada opción a un buzón
-    var cursor: usize = 0;
-    while (true) {
-        ui.clearScreen();
-        ui.printSectionTitle("Enrutamiento de Correos");
-        std.debug.print("  \x1b[90mAsigna un buzon de destino para cada grupo de fecha disponible en el PST.\x1b[0m\n", .{});
-        std.debug.print("  \x1b[90m↑/↓ mover | Enter asignar buzon | D desactivar/quitar | F finalizar mapeo | Q cancelar\x1b[0m\n\n", .{});
-
-        for (options.items, 0..) |opt, idx| {
-            const is_current = idx == cursor;
-            if (is_current) std.debug.print("  \x1b[7m", .{});
-
-            if (criterion == .by_year) {
-                std.debug.print("  Anio {d:4} => {s}", .{ opt.year, opt.store_name });
-            } else {
-                const month_name = getMonthName(opt.month.?);
-                std.debug.print("  {s:9} {d:4} => {s}", .{ month_name, opt.year, opt.store_name });
-            }
-
-            if (is_current) std.debug.print("\x1b[0m", .{});
-            std.debug.print("\n", .{});
-        }
-
-        const key = ui.readSingleKey() catch continue;
-        switch (key) {
-            'q', 'Q' => return error.Cancelled,
-            'f', 'F' => {
-                // Verificar si al menos hay un mapeo configurado
-                var mapped_count: usize = 0;
-                for (options.items) |opt| {
-                    if (opt.store_id.len > 0) mapped_count += 1;
-                }
-                if (mapped_count == 0) {
-                    ui.printError("Debes asignar al menos un buzon de destino para continuar.");
-                    ui.waitForEnter();
-                    continue;
-                }
-                break;
-            },
-            'd', 'D' => {
-                // Quitar asignación
-                var opt = &options.items[cursor];
-                allocator.free(opt.store_id);
-                allocator.free(opt.store_name);
-                allocator.free(opt.store_type);
-                opt.store_id = try allocator.dupe(u8, "");
-                opt.store_name = try allocator.dupe(u8, "Sin asignar (se omitira)");
-                opt.store_type = try allocator.dupe(u8, "");
-            },
-            'w', 'W', 'k', 'K' => {
-                if (cursor > 0) cursor -= 1;
-            },
-            's', 'S', 'j', 'J' => {
-                if (cursor + 1 < options.items.len) cursor += 1;
-            },
-            '\r', '\n' => {
-                // Seleccionar buzón de destino para el elemento actual
-                const selected_store = store_selector.selectTargetStore(allocator, profile_name) catch |err| {
-                    if (err == error.Cancelled) continue;
-                    ui.printError("Error seleccionando buzon");
-                    ui.waitForEnter();
-                    continue;
-                };
-                var opt = &options.items[cursor];
-                allocator.free(opt.store_id);
-                allocator.free(opt.store_name);
-                allocator.free(opt.store_type);
-                opt.store_id = selected_store.store_id; // Toma posesión
-                opt.store_name = selected_store.display_name; // Toma posesión
-                opt.store_type = selected_store.store_type; // Toma posesión
-            },
-            27 => {
-                const seq1 = ui.readSingleKey() catch continue;
-                if (seq1 != '[' and seq1 != 'O') continue;
-
-                const seq2 = ui.readSingleKey() catch continue;
-                switch (seq2) {
-                    'A' => {
-                        if (cursor > 0) cursor -= 1;
-                    },
-                    'B' => {
-                        if (cursor + 1 < options.items.len) cursor += 1;
-                    },
-                    else => {},
-                }
-            },
-            0, 224 => {
-                const ext = ui.readSingleKey() catch continue;
-                switch (ext) {
-                    72 => {
-                        if (cursor > 0) cursor -= 1;
-                    },
-                    80 => {
-                        if (cursor + 1 < options.items.len) cursor += 1;
-                    },
-                    else => {},
-                }
-            },
-            else => {},
-        }
-    }
-
-    return try options.toOwnedSlice(allocator);
-}
-
 const DateItem = struct {
     year: i32,
     month: u8,
 };
 
+fn dateKey(year: i32, month: u8) ?u32 {
+    const year_u32 = std.math.cast(u32, year) orelse return null;
+    return (year_u32 << 8) | @as(u32, month);
+}
+
 fn compareDateItemsDesc(context: void, a: DateItem, b: DateItem) bool {
     _ = context;
-    if (a.year != b.year) {
-        return a.year > b.year;
-    }
+    if (a.year != b.year) return a.year > b.year;
     return a.month > b.month;
 }
 
@@ -284,6 +45,180 @@ fn getMonthName(month: u8) []const u8 {
     };
 }
 
+fn renderCriterionMenu(cursor: usize, labels: []const []const u8) void {
+    menu_ui.beginMenu("Criterio de Enrutamiento");
+    menu_ui.printMutedLine("Selecciona como deseas agrupar los correos para enviarlos a diferentes buzones.");
+    menu_ui.printMutedLine("↑/↓ mover | Enter confirmar | Q cancelar");
+    std.debug.print("\n", .{});
+
+    for (labels, 0..) |label, idx| {
+        menu_ui.printSelectableLabel(label, idx == cursor);
+    }
+}
+
+fn unassignedMapping(allocator: std.mem.Allocator, year: i32, month: ?u8) !types.TargetStoreMapping {
+    return .{
+        .year = year,
+        .month = month,
+        .store_id = try allocator.dupe(u8, ""),
+        .store_name = try allocator.dupe(u8, "Sin asignar (se omitira)"),
+        .store_type = try allocator.dupe(u8, ""),
+    };
+}
+
+fn renderRoutingOptions(cursor: usize, criterion: types.RoutingCriterion, options: []const types.TargetStoreMapping) void {
+    menu_ui.beginMenu("Enrutamiento de Correos");
+    menu_ui.printMutedLine("Asigna un buzon de destino para cada grupo de fecha disponible en el PST.");
+    menu_ui.printMutedLine("↑/↓ mover | Enter asignar buzon | D desactivar/quitar | F finalizar mapeo | Q cancelar");
+    std.debug.print("\n", .{});
+
+    for (options, 0..) |opt, idx| {
+        const is_current = idx == cursor;
+        menu_ui.beginHighlightedRow(is_current);
+
+        if (criterion == .by_year) {
+            std.debug.print("  Anio {d:4} => {s}", .{ opt.year, opt.store_name });
+        } else {
+            const month_name = getMonthName(opt.month.?);
+            std.debug.print("  {s:9} {d:4} => {s}", .{ month_name, opt.year, opt.store_name });
+        }
+
+        menu_ui.endHighlightedRow(is_current);
+        std.debug.print("\n", .{});
+    }
+}
+
+fn assignStoreToOption(allocator: std.mem.Allocator, opt: *types.TargetStoreMapping, selected_store: anytype) void {
+    allocator.free(opt.store_id);
+    allocator.free(opt.store_name);
+    allocator.free(opt.store_type);
+    opt.store_id = selected_store.store_id;
+    opt.store_name = selected_store.display_name;
+    opt.store_type = selected_store.store_type;
+}
+
+fn resetOption(allocator: std.mem.Allocator, opt: *types.TargetStoreMapping) !void {
+    allocator.free(opt.store_id);
+    allocator.free(opt.store_name);
+    allocator.free(opt.store_type);
+    opt.* = try unassignedMapping(allocator, opt.year, opt.month);
+}
+
+fn buildRoutingOptions(
+    allocator: std.mem.Allocator,
+    criterion: types.RoutingCriterion,
+    items_found: []DateItem,
+) ![]types.TargetStoreMapping {
+    var options = std.ArrayListUnmanaged(types.TargetStoreMapping){};
+    errdefer {
+        for (options.items) |opt| {
+            opt.deinit(allocator);
+        }
+        options.deinit(allocator);
+    }
+
+    if (criterion == .by_year) {
+        var seen_years = std.AutoHashMap(i32, void).init(allocator);
+        defer seen_years.deinit();
+
+        var years = std.ArrayListUnmanaged(i32){};
+        defer years.deinit(allocator);
+
+        for (items_found) |it| {
+            if (seen_years.contains(it.year)) continue;
+            try seen_years.put(it.year, {});
+            try years.append(allocator, it.year);
+        }
+
+        std.sort.pdq(i32, years.items, {}, std.sort.desc(i32));
+
+        for (years.items) |year| {
+            try options.append(allocator, try unassignedMapping(allocator, year, null));
+        }
+    } else {
+        std.sort.pdq(DateItem, items_found, {}, compareDateItemsDesc);
+        for (items_found) |it| {
+            try options.append(allocator, try unassignedMapping(allocator, it.year, it.month));
+        }
+    }
+
+    return try options.toOwnedSlice(allocator);
+}
+
+pub fn selectRoutingCriterion() !types.RoutingCriterion {
+    var cursor: usize = 0;
+    const labels = [_][]const u8{
+        "Agrupado por Anos  (Ej: 2023 -> Buzon A, 2024 -> Buzon B)",
+        "Agrupado por Meses (Ej: Enero 2024 -> Buzon A, Febrero 2024 -> Buzon B)",
+    };
+
+    while (true) {
+        renderCriterionMenu(cursor, labels[0..]);
+
+        const input = ui.readMenuInput(&cursor, labels.len) catch continue;
+        switch (input) {
+            .cancel => return error.Cancelled,
+            .enter => return if (cursor == 0) .by_year else .by_month,
+            else => {},
+        }
+    }
+}
+
+pub fn configureMappings(
+    allocator: std.mem.Allocator,
+    criterion: types.RoutingCriterion,
+    folders_json_path: []const u8,
+    profile_name: ?[]const u8,
+) ![]types.TargetStoreMapping {
+    const items_found = try parseAvailableDates(allocator, folders_json_path);
+    defer allocator.free(items_found);
+
+    if (items_found.len == 0) {
+        ui.printError("No se encontraron correos con fecha en el escaneo previo para enrutar.");
+        ui.waitForEnter();
+        return error.NoDataToRoute;
+    }
+
+    const options = try buildRoutingOptions(allocator, criterion, items_found);
+    var success = false;
+    defer if (!success) {
+        utils.freeTargetStoreMappings(allocator, options);
+    };
+
+    var cursor: usize = 0;
+    while (true) {
+        renderRoutingOptions(cursor, criterion, options);
+
+        const input = ui.readMenuInput(&cursor, options.len) catch continue;
+        switch (input) {
+            .cancel => return error.Cancelled,
+            .enter => {
+                const selected_store = store_selector.selectTargetStore(allocator, profile_name) catch |err| {
+                    if (err == error.Cancelled) continue;
+                    ui.printError("Error seleccionando buzon");
+                    ui.waitForEnter();
+                    continue;
+                };
+                assignStoreToOption(allocator, &options[cursor], selected_store);
+            },
+            .key => |key| switch (key) {
+                'f', 'F' => {
+                    if (utils.countAssignedMappings(options) == 0) {
+                        ui.printError("Debes asignar al menos un buzon de destino para continuar.");
+                        ui.waitForEnter();
+                        continue;
+                    }
+                    success = true;
+                    return options;
+                },
+                'd', 'D' => try resetOption(allocator, &options[cursor]),
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
 fn parseAvailableDates(allocator: std.mem.Allocator, json_path: []const u8) ![]DateItem {
     var file = try std.fs.openFileAbsolute(json_path, .{});
     defer file.close();
@@ -297,110 +232,51 @@ fn parseAvailableDates(allocator: std.mem.Allocator, json_path: []const u8) ![]D
     var items = std.ArrayListUnmanaged(DateItem){};
     errdefer items.deinit(allocator);
 
-    // Parsear el JSON manualmente de forma sencilla extrayendo los yearBreakdown de las carpetas
-    var pos: usize = 0;
-    const token = "\"yearBreakdown\":[";
-    while (std.mem.indexOfPos(u8, buffer, pos, token)) |start| {
-        pos = start + token.len;
-        while (pos < buffer.len) {
-            if (buffer[pos] == ']') break;
-            if (buffer[pos] == '{') {
-                const obj_end = std.mem.indexOfScalarPos(u8, buffer, pos, '}') orelse break;
-                const row = buffer[pos .. obj_end + 1];
+    var seen_dates = std.AutoHashMap(u32, void).init(allocator);
+    defer seen_dates.deinit();
 
-                const year = extractNumber(row, "year");
-                if (year) |y| {
-                    // Por simplicidad, agregamos meses para ese año (por defecto asumimos el mes si se requiere, pero podemos escanear las estadísticas o simplemente registrar el año)
-                    // Para soportar meses detallados, vamos a buscar si hay un "monthBreakdown" en el JSON
-                    // El scan con -ExportStatistics incluye monthBreakdown en cada carpeta. Busquemos si está presente.
-                    const month_token = "\"monthBreakdown\":[";
-                    if (std.mem.indexOfPos(u8, buffer, start, month_token)) |m_start| {
-                        // Si hay monthBreakdown, parseamos los meses reales
-                        var m_pos = m_start + month_token.len;
-                        while (m_pos < buffer.len) {
-                            if (buffer[m_pos] == ']') break;
-                            if (buffer[m_pos] == '{') {
-                                const m_obj_end = std.mem.indexOfScalarPos(u8, buffer, m_pos, '}') orelse break;
-                                const m_row = buffer[m_pos .. m_obj_end + 1];
-                                const m_str = extractString(m_row, "month"); // "2024-03"
-                                const m_count = extractNumber(m_row, "count") orelse 0;
+    var month_pos: usize = 0;
+    while (std.mem.indexOfPos(u8, buffer, month_pos, "\"month\"")) |key_pos| {
+        month_pos = key_pos + "\"month\"".len;
+        const row = utils.findEnclosingObject(buffer, key_pos) orelse continue;
+        const month_str = utils.extractString(row, "month") orelse continue;
+        const count = utils.extractNumber(row, "count") orelse 0;
+        if (count <= 0) continue;
+        if (month_str.len < 7 or month_str[4] != '-') continue;
 
-                                if (m_str != null and m_count > 0) {
-                                    // Parsear año y mes de "2024-03"
-                                    if (m_str.?.len >= 7 and m_str.?[4] == '-') {
-                                        const parsed_y = std.fmt.parseInt(i32, m_str.?[0..4], 10) catch @as(i32, @intCast(y));
-                                        const parsed_m = std.fmt.parseInt(u8, m_str.?[5..7], 10) catch @as(u8, 1);
+        const year = std.fmt.parseInt(i32, month_str[0..4], 10) catch continue;
+        const month = std.fmt.parseInt(u8, month_str[5..7], 10) catch continue;
+        if (month < 1 or month > 12) continue;
 
-                                        // Evitar duplicados en la lista temporal
-                                        var exists = false;
-                                        for (items.items) |it| {
-                                            if (it.year == parsed_y and it.month == parsed_m) {
-                                                exists = true;
-                                                break;
-                                            }
-                                        }
-                                        if (!exists) {
-                                            try items.append(allocator, .{ .year = parsed_y, .month = parsed_m });
-                                        }
-                                    }
-                                }
-                                m_pos = m_obj_end + 1;
-                                continue;
-                            }
-                            m_pos += 1;
-                        }
-                    } else {
-                        // Si no hay mes detallado (por ej. escaneo rápido), registramos todos los meses del 1 al 12
-                        // Aunque para máxima precisión, el wizard forzará un escaneo con estadísticas si se selecciona enrutamiento.
-                        var m: u8 = 1;
-                        while (m <= 12) : (m += 1) {
-                            var exists = false;
-                            for (items.items) |it| {
-                                if (it.year == y and it.month == m) {
-                                    exists = true;
-                                    break;
-                                }
-                            }
-                            if (!exists) {
-                                try items.append(allocator, .{ .year = @intCast(y), .month = m });
-                            }
-                        }
-                    }
-                }
-                pos = obj_end + 1;
-                continue;
-            }
-            pos += 1;
+        const key = dateKey(year, month) orelse continue;
+        if (seen_dates.contains(key)) continue;
+        try seen_dates.put(key, {});
+        try items.append(allocator, .{ .year = year, .month = month });
+    }
+
+    if (items.items.len > 0) {
+        return try items.toOwnedSlice(allocator);
+    }
+
+    var year_pos: usize = 0;
+    while (std.mem.indexOfPos(u8, buffer, year_pos, "\"year\"")) |key_pos| {
+        year_pos = key_pos + "\"year\"".len;
+        const row = utils.findEnclosingObject(buffer, key_pos) orelse continue;
+        const year_num = utils.extractNumber(row, "year") orelse continue;
+        const count = utils.extractNumber(row, "count") orelse 0;
+        if (count <= 0) continue;
+
+        const year = std.math.cast(i32, year_num) orelse continue;
+        if (year < 1900 or year > 9999) continue;
+
+        var m: u8 = 1;
+        while (m <= 12) : (m += 1) {
+            const key = dateKey(year, m) orelse continue;
+            if (seen_dates.contains(key)) continue;
+            try seen_dates.put(key, {});
+            try items.append(allocator, .{ .year = year, .month = m });
         }
     }
 
     return try items.toOwnedSlice(allocator);
-}
-
-fn extractNumber(json: []const u8, key: []const u8) ?i64 {
-    var search_buf: [128]u8 = undefined;
-    const search = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
-    const key_pos = std.mem.indexOf(u8, json, search) orelse return null;
-    var pos = key_pos + search.len;
-    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
-    if (pos >= json.len) return null;
-    var end = pos;
-    if (end < json.len and json[end] == '-') end += 1;
-    while (end < json.len and json[end] >= '0' and json[end] <= '9') : (end += 1) {}
-    if (end == pos) return null;
-    return std.fmt.parseInt(i64, json[pos..end], 10) catch null;
-}
-
-fn extractString(json: []const u8, key: []const u8) ?[]const u8 {
-    var search_buf: [128]u8 = undefined;
-    const search = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
-    const start_pos = std.mem.indexOf(u8, json, search) orelse return null;
-    const pos = start_pos + search.len;
-    var end = pos;
-    while (end < json.len) : (end += 1) {
-        if (json[end] == '"' and (end == pos or json[end - 1] != '\\')) {
-            return json[pos..end];
-        }
-    }
-    return null;
 }

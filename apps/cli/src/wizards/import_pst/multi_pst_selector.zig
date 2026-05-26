@@ -15,6 +15,13 @@ pub const PstListResult = struct {
     }
 };
 
+fn containsPath(paths: [][]u8, target: []const u8) bool {
+    for (paths) |existing| {
+        if (std.mem.eql(u8, existing, target)) return true;
+    }
+    return false;
+}
+
 /// Permite seleccionar múltiples archivos PST de forma interactiva
 pub fn selectMultiplePstFiles(allocator: std.mem.Allocator) !PstListResult {
     var paths = std.ArrayListUnmanaged([]u8){};
@@ -51,15 +58,7 @@ pub fn selectMultiplePstFiles(allocator: std.mem.Allocator) !PstListResult {
                     if (err == error.Cancelled) continue;
                     return err;
                 };
-                // Evitar duplicados en la lista de selección temporal
-                var dup = false;
-                for (paths.items) |existing| {
-                    if (std.mem.eql(u8, existing, p)) {
-                        dup = true;
-                        break;
-                    }
-                }
-                if (dup) {
+                if (containsPath(paths.items, p)) {
                     allocator.free(p);
                     ui.printError("Ese archivo PST ya ha sido seleccionado");
                     ui.waitForEnter();
