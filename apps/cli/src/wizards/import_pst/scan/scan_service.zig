@@ -15,8 +15,26 @@ pub fn runScanAndSelectFolders(
     profile_name: ?[]const u8,
     enable_routing: bool,
 ) !types.FolderSelectionResult {
+    return runScanWithSource(allocator, pst_path, scan_mode, scan_filter_year, profile_name, enable_routing);
+}
+
+pub fn runScanWithSource(
+    allocator: std.mem.Allocator,
+    source_id: []const u8,
+    scan_mode: types.ScanMode,
+    scan_filter_year: ?[]const u8,
+    profile_name: ?[]const u8,
+    enable_routing: bool,
+) !types.FolderSelectionResult {
+    // Auto-detect: if source looks like an absolute path, it's a PST file
+    const is_pst = std.fs.path.isAbsolute(source_id);
+
     ui.clearScreen();
-    ui.printSectionTitle("Escanear PST");
+    if (is_pst) {
+        ui.printSectionTitle("Escanear PST");
+    } else {
+        ui.printSectionTitle("Escanear origen");
+    }
     std.debug.print("  \x1b[90mEjecutando escaneo {s}...\x1b[0m\n", .{if (scan_mode == .deep) "profundo" else "rapido"});
 
     const scan_script_path = try ps_runner.writeEmbeddedScript(allocator, .scan_pst);
@@ -28,9 +46,13 @@ pub fn runScanAndSelectFolders(
     var args_builder = args_builder_mod.ArgsBuilder.init(allocator);
     defer args_builder.deinit();
 
+    if (is_pst) {
+        try args_builder.addSlice(&.{ "-PstPath", source_id });
+    } else {
+        try args_builder.addSlice(&.{ "-StoreId", source_id });
+    }
+
     try args_builder.addSlice(&.{
-        "-PstPath",
-        pst_path,
         "-Json",
         "-Headless",
         "-ExportFolders",

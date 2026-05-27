@@ -131,3 +131,10 @@ pub fn writeFolderPlanFromFlags(allocator: std.mem.Allocator, folders: []const S
     try file.writeAll(json.items);
     return plan_path;
 }
+
+pub fn cleanupFolderSelection(allocator: std.mem.Allocator, result: *const types.FolderSelectionResult) void {
+    utils.cleanupTempFile(result.folder_plan_path);
+    allocator.free(result.folder_plan_path);
+    utils.cleanupTempFile(result.scan_export_path);
+    allocator.free(result.scan_export_path);
+}

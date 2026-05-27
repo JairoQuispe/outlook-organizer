@@ -25,6 +25,7 @@ pub fn ensureAnsiMode() void {
 pub const MenuChoice = enum {
     import_pst,
     scan_pst,
+    transfer,
     exit,
 };
 
@@ -109,6 +110,7 @@ pub fn printBanner() void {
 pub fn printMenuOptions() void {
     std.debug.print("  \x1b[1;37m1.\x1b[0m Importar PST\n", .{});
     std.debug.print("  \x1b[1;37m2.\x1b[0m Scan PST\n", .{});
+    std.debug.print("  \x1b[1;37m3.\x1b[0m Transferir correos (cualquier store)\n", .{});
     std.debug.print("  \x1b[1;37m0.\x1b[0m Salir\n", .{});
     std.debug.print("\n", .{});
     std.debug.print("  \x1b[33mSelecciona una opcion:\x1b[0m ", .{});
@@ -119,6 +121,7 @@ pub fn readMenuChoice() !MenuChoice {
     const labels = [_][]const u8{
         "Importar PST",
         "Scan PST",
+        "Transferir correos",
         "Salir",
     };
 
@@ -138,6 +141,7 @@ pub fn readMenuChoice() !MenuChoice {
         switch (key) {
             '1' => return .import_pst,
             '2' => return .scan_pst,
+            '3' => return .transfer,
             '0', 'q', 'Q' => return .exit,
             'w', 'W', 'k', 'K' => {
                 if (cursor > 0) cursor -= 1;
@@ -149,6 +153,7 @@ pub fn readMenuChoice() !MenuChoice {
                 return switch (cursor) {
                     0 => .import_pst,
                     1 => .scan_pst,
+                    2 => .transfer,
                     else => .exit,
                 };
             },

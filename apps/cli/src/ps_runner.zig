@@ -4,6 +4,7 @@ pub const ScriptId = enum {
     import_pst,
     list_stores,
     scan_pst,
+    transfer,
 };
 
 pub const ScriptRunResult = struct {
@@ -21,12 +22,14 @@ pub fn writeEmbeddedScript(allocator: std.mem.Allocator, script_id: ScriptId) ![
         .import_pst => @embedFile("outlook-import-pst.ps1"),
         .list_stores => @embedFile("outlook-list-stores.ps1"),
         .scan_pst => @embedFile("outlook-scan-pst.ps1"),
+        .transfer => @embedFile("outlook-transfer.ps1"),
     };
 
     const script_tag = switch (script_id) {
         .import_pst => "import-pst",
         .list_stores => "list-stores",
         .scan_pst => "scan-pst",
+        .transfer => "transfer",
     };
 
     const pid: u32 = std.os.windows.GetCurrentProcessId();
