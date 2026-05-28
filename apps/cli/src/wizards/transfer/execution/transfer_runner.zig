@@ -2,6 +2,7 @@ const std = @import("std");
 const ui = @import("../../../ui.zig");
 const ps_runner = @import("../../../ps_runner.zig");
 const types = @import("../types.zig");
+const import_utils = @import("../../import_pst/utils.zig");
 
 pub const ArgsBuilder = struct {
     allocator: std.mem.Allocator,
@@ -44,22 +45,51 @@ pub const ArgsBuilder = struct {
     }
 };
 
+fn ensureProcessSafeArgs(allocator: std.mem.Allocator, args: []const []const u8) ![]const []const u8 {
+    const out = try allocator.alloc([]const u8, args.len);
+    for (args, 0..) |arg, i| {
+        if (std.unicode.utf8ValidateSlice(arg)) {
+            out[i] = arg;
+        } else {
+            out[i] = try sanitizeProcessArgAscii(allocator, arg);
+        }
+    }
+    return out;
+}
+
+fn sanitizeProcessArgAscii(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    for (raw) |ch| {
+        if ((ch >= 0x20 and ch <= 0x7E) or ch == '\t') {
+            try out.append(allocator, ch);
+        }
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
 pub fn buildTransferArgs(allocator: std.mem.Allocator, config: types.TransferConfig) ![]const []const u8 {
     var builder = ArgsBuilder.init(allocator);
     errdefer builder.deinit();
 
-    try builder.addSlice(&.{"-Json", "-Headless"});
+    try builder.addSlice(&.{ "-Json", "-Headless" });
 
     if (config.source_info.pst_path.len > 0) {
         try builder.addOption("-SourcePstPath", config.source_info.pst_path);
     } else if (config.source_info.store_id.len > 0) {
-        try builder.addOption("-SourceStoreId", config.source_info.store_id);
+        const source_store_id = try sanitizeStoreId(allocator, config.source_info.store_id);
+        if (source_store_id.len == 0) return error.InvalidStoreId;
+        try builder.addOption("-SourceStoreId", source_store_id);
     }
 
     if (config.dest_info.pst_path.len > 0) {
         try builder.addOption("-DestPstPath", config.dest_info.pst_path);
     } else if (config.dest_info.store_id.len > 0) {
-        try builder.addOption("-DestStoreId", config.dest_info.store_id);
+        const dest_store_id = try sanitizeStoreId(allocator, config.dest_info.store_id);
+        if (dest_store_id.len == 0) return error.InvalidStoreId;
+        try builder.addOption("-DestStoreId", dest_store_id);
     }
 
     try builder.addOption("-Action", config.action);
@@ -100,12 +130,14 @@ fn buildRoutingMappingsJson(allocator: std.mem.Allocator, mappings: []const type
     try json.appendSlice(allocator, "[");
     var first = true;
     for (mappings) |m| {
-        if (m.store_id.len == 0) continue;
+        const sanitized_store_id = try sanitizeStoreId(allocator, m.store_id);
+        defer allocator.free(sanitized_store_id);
+        if (sanitized_store_id.len == 0) continue;
         if (!first) try json.appendSlice(allocator, ",");
         first = false;
 
         try json.appendSlice(allocator, "{\"storeId\":\"");
-        try appendJsonEscaped(allocator, &json, m.store_id);
+        try appendJsonEscaped(allocator, &json, sanitized_store_id);
         try json.appendSlice(allocator, "\",\"year\":");
         const y = try std.fmt.allocPrint(allocator, "{d}", .{m.year});
         defer allocator.free(y);
@@ -122,7 +154,25 @@ fn buildRoutingMappingsJson(allocator: std.mem.Allocator, mappings: []const type
     }
     try json.appendSlice(allocator, "]");
 
+    if (first) return error.NoValidMappings;
+
     return try json.toOwnedSlice(allocator);
+}
+
+fn sanitizeStoreId(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    for (raw) |ch| {
+        if ((ch >= '0' and ch <= '9') or
+            (ch >= 'a' and ch <= 'f') or
+            (ch >= 'A' and ch <= 'F'))
+        {
+            try out.append(allocator, std.ascii.toUpper(ch));
+        }
+    }
+
+    return try out.toOwnedSlice(allocator);
 }
 
 fn appendJsonEscaped(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8), value: []const u8) !void {
@@ -174,22 +224,92 @@ pub fn executeTransfer(allocator: std.mem.Allocator, config: types.TransferConfi
     ui.clearScreen();
     ui.printSectionTitle("Transfiriendo...");
 
+    var source_size_bytes: ?u64 = null;
+    if (config.source_info.pst_path.len > 0) {
+        if (std.fs.openFileAbsolute(config.source_info.pst_path, .{})) |file| {
+            defer file.close();
+            if (file.stat()) |stat| {
+                source_size_bytes = stat.size;
+            } else |_| {}
+        } else |_| {}
+    }
+
+    var size_buf: [32]u8 = undefined;
+    const source_size_str: []const u8 = if (source_size_bytes) |bytes|
+        import_utils.formatBytesShortFromU64(&size_buf, bytes)
+    else
+        "Desconocido";
+
+    const SYSTEMTIME = extern struct {
+        wYear: u16,
+        wMonth: u16,
+        wDayOfWeek: u16,
+        wDay: u16,
+        wHour: u16,
+        wMinute: u16,
+        wSecond: u16,
+        wMilliseconds: u16,
+    };
+    const kernel32 = struct {
+        extern "kernel32" fn GetLocalTime(lpSystemTime: *SYSTEMTIME) void;
+    };
+    var start_sys_time: SYSTEMTIME = undefined;
+    kernel32.GetLocalTime(&start_sys_time);
+
+    var date_time_buf: [64]u8 = undefined;
+    const date_time_str = std.fmt.bufPrint(&date_time_buf, "{0d:0>2}/{1d:0>2}/{2d:0>4} {3d:0>2}:{4d:0>2}:{5d:0>2}", .{
+        start_sys_time.wDay,
+        start_sys_time.wMonth,
+        start_sys_time.wYear,
+        start_sys_time.wHour,
+        start_sys_time.wMinute,
+        start_sys_time.wSecond,
+    }) catch "Desconocida";
+
+    printTransferExecutionSummary(config, source_size_str, date_time_str);
+
     const script_path = try ps_runner.writeEmbeddedScript(allocator, .transfer);
     defer ps_runner.cleanupScript(allocator, script_path);
 
-    const args = try buildTransferArgs(allocator, config);
-    defer allocator.free(args);
+    var args_arena = std.heap.ArenaAllocator.init(allocator);
+    defer args_arena.deinit();
+    const args = try buildTransferArgs(args_arena.allocator(), config);
+    const safe_args = try ensureProcessSafeArgs(args_arena.allocator(), args);
 
     std.debug.print("  \x1b[90mEjecutando script de transferencia...\x1b[0m\n\n", .{});
 
     const start_time = std.time.milliTimestamp();
+    var progress_state = TransferProgressState{
+        .start_ms = start_time,
+        .copied = 0,
+        .moved = 0,
+        .skipped = 0,
+        .failed = 0,
+        .size_bytes = 0,
+        .percent = 0,
+        .has_rendered_progress = false,
+    };
 
-    const script_run = ps_runner.runScriptDetailedStreaming(allocator, script_path, args, onTransferScriptLine, undefined) catch {
-        ui.failAbort("Error ejecutando el script de transferencia");
+    const script_run = ps_runner.runScriptDetailedStreaming(allocator, script_path, safe_args, onTransferScriptLine, &progress_state) catch |err| {
+        if (progress_state.has_rendered_progress) {
+            std.debug.print("\n", .{});
+        }
+        ui.printError("Error ejecutando el script de transferencia");
+        std.debug.print("  \x1b[90mDetalle:\x1b[0m {s}\n", .{@errorName(err)});
+        const command_preview = ps_runner.buildCommandPreview(allocator, "powershell.exe", script_path, safe_args) catch null;
+        if (command_preview) |cmd| {
+            defer allocator.free(cmd);
+            std.debug.print("  \x1b[90mComando:\x1b[0m {s}\n", .{cmd});
+        }
+        ui.waitForEnter();
         return;
     };
     defer allocator.free(script_run.command_line);
     defer allocator.free(script_run.output);
+
+    if (progress_state.has_rendered_progress) {
+        std.debug.print("\n", .{});
+    }
 
     std.debug.print("  \x1b[90mExit code:\x1b[0m {d}\n\n", .{script_run.exit_code});
 
@@ -217,25 +337,182 @@ pub fn executeTransfer(allocator: std.mem.Allocator, config: types.TransferConfi
     ui.waitForEnter();
 }
 
-pub const TransferProgressState = types.TransferProgressState;
+fn printTransferExecutionSummary(config: types.TransferConfig, source_size_str: []const u8, date_time_str: []const u8) void {
+    std.debug.print("  \x1b[1;30m======================================================================\x1b[0m\n", .{});
 
-pub fn onTransferScriptLine(ctx: *anyopaque, line: []const u8) void {
-    _ = ctx;
-    _ = parseProgressLine(line);
+    if (config.source_info.pst_path.len > 0) {
+        std.debug.print("  \x1b[1;37mOrigen PST:\x1b[0m      {s} ({s})\n", .{ config.source_info.pst_path, source_size_str });
+    } else {
+        std.debug.print("  \x1b[1;37mOrigen buzon:\x1b[0m    {s}\n", .{config.source_info.store_name});
+    }
+
+    std.debug.print("  \x1b[1;37mPerfil Outlook:\x1b[0m   {s}\n", .{import_utils.profileDisplayName(config.profile_name)});
+
+    if (config.routing_criterion) |criterion| {
+        std.debug.print("  \x1b[1;37mEnrutamiento:\x1b[0m     Multibuzon (agrupado por {s})\n", .{if (criterion == .by_year) "Anos" else "Meses"});
+        std.debug.print("  \x1b[1;37mMapeos asignados:\x1b[0m {d}\n", .{countAssignedTransferMappings(config.routing_mappings)});
+    } else if (config.dest_info.pst_path.len > 0) {
+        std.debug.print("  \x1b[1;37mDestino PST:\x1b[0m     {s}\n", .{config.dest_info.pst_path});
+    } else {
+        std.debug.print("  \x1b[1;37mBuzon destino:\x1b[0m   {s}\n", .{config.dest_info.store_name});
+        std.debug.print("  \x1b[1;37mTipo de buzon:\x1b[0m    {s}\n", .{import_utils.storeTypeDisplayName(config.dest_info.store_type)});
+    }
+
+    std.debug.print("  \x1b[1;37mAccion:\x1b[0m          {s}\n", .{if (std.mem.eql(u8, config.action, "Move")) "Mover" else "Copiar"});
+    std.debug.print("  \x1b[1;37mDuplicados:\x1b[0m      {s}\n", .{if (config.skip_duplicates) "Saltar" else "No saltar"});
+    std.debug.print("  \x1b[1;37mRevision dup:\x1b[0m    {s}\n", .{if (config.deep_duplicate_check) "Profunda" else "Simple"});
+    std.debug.print("  \x1b[1;37mThrottling:\x1b[0m     {s}\n", .{if (config.adaptive_throttling) "Adaptativo" else "Fijo"});
+    std.debug.print("  \x1b[1;37mCarpetas plan:\x1b[0m   {s}\n", .{config.folder_plan_path});
+
+    if (config.filter_year) |y| {
+        std.debug.print("  \x1b[1;37mFiltro de anios:\x1b[0m {s}\n", .{y});
+    } else {
+        std.debug.print("  \x1b[1;37mFiltro de anios:\x1b[0m Todos los anios\n", .{});
+    }
+    if (config.filter_months) |m| {
+        std.debug.print("  \x1b[1;37mFiltro de meses:\x1b[0m {s}\n", .{m});
+    }
+
+    std.debug.print("  \x1b[1;37mInicio proceso:\x1b[0m   {s}\n", .{date_time_str});
+    std.debug.print("  \x1b[1;30m======================================================================\x1b[0m\n\n", .{});
 }
 
-fn parseProgressLine(line: []const u8) void {
+fn countAssignedTransferMappings(mappings: ?[]const types.TargetStoreMapping) usize {
+    const items = mappings orelse return 0;
+    var count: usize = 0;
+    for (items) |m| {
+        if (m.store_id.len > 0) count += 1;
+    }
+    return count;
+}
+
+pub const TransferProgressState = types.TransferProgressState;
+
+const ParsedProgress = struct {
+    processed: i64,
+    total: i64,
+};
+
+fn parseProcessedTotalFromStatus(status: []const u8) ?ParsedProgress {
+    const close_idx = std.mem.lastIndexOfScalar(u8, status, ')') orelse return null;
+    const open_idx = std.mem.lastIndexOfScalar(u8, status[0..close_idx], '(') orelse return null;
+    if (open_idx >= close_idx) return null;
+
+    const inner = std.mem.trim(u8, status[open_idx + 1 .. close_idx], " ");
+    const slash_idx = std.mem.indexOfScalar(u8, inner, '/') orelse return null;
+    const left = std.mem.trim(u8, inner[0..slash_idx], " ");
+    const right = std.mem.trim(u8, inner[slash_idx + 1 ..], " ");
+    if (left.len == 0 or right.len == 0) return null;
+
+    const processed = std.fmt.parseInt(i64, left, 10) catch return null;
+    const total = std.fmt.parseInt(i64, right, 10) catch return null;
+    if (processed < 0 or total <= 0) return null;
+
+    return .{ .processed = processed, .total = total };
+}
+
+pub fn onTransferScriptLine(ctx: *anyopaque, line: []const u8) void {
+    const state: *TransferProgressState = @ptrCast(@alignCast(ctx));
+    parseProgressLine(state, line);
+}
+
+fn parseProgressLine(state: *TransferProgressState, line: []const u8) void {
     const kind = extractJsonString(line, "type") orelse return;
     if (!std.mem.eql(u8, kind, "progress")) return;
 
-    const status = extractJsonString(line, "status") orelse return;
-    const percent = extractJsonNumber(line, "percent") orelse 0;
-    const copied = extractJsonNumber(line, "copied") orelse 0;
-    const moved = extractJsonNumber(line, "moved") orelse 0;
-    const skipped = extractJsonNumber(line, "skipped") orelse 0;
-    const failed = extractJsonNumber(line, "failed") orelse 0;
+    const status = extractJsonString(line, "status") orelse "";
+    state.copied = extractJsonNumber(line, "copied") orelse state.copied;
+    state.moved = extractJsonNumber(line, "moved") orelse state.moved;
+    state.skipped = extractJsonNumber(line, "skipped") orelse state.skipped;
+    state.failed = extractJsonNumber(line, "failed") orelse state.failed;
+    state.size_bytes = extractJsonNumber(line, "sizeBytes") orelse state.size_bytes;
 
-    std.debug.print("\r\x1b[2K  \x1b[90m{s}\x1b[0m {d}% | C:{d} M:{d} S:{d} F:{d}", .{ status, percent, copied, moved, skipped, failed });
+    const raw_percent = extractJsonNumber(line, "percent") orelse @as(i64, @intCast(state.percent));
+    if (raw_percent <= 0) {
+        state.percent = 0;
+    } else if (raw_percent >= 100) {
+        state.percent = 100;
+    } else {
+        state.percent = @intCast(raw_percent);
+    }
+
+    const total_script_processed = state.copied + state.moved + state.skipped + state.failed;
+    const elapsed_ms = std.time.milliTimestamp() - state.start_ms;
+
+    if (state.has_rendered_progress) {
+        std.debug.print("\x1b[7F", .{});
+    } else {
+        state.has_rendered_progress = true;
+    }
+
+    const parsed = parseProcessedTotalFromStatus(status);
+    const processed_effective = if (parsed) |p|
+        @max(p.processed, total_script_processed)
+    else
+        total_script_processed;
+
+    const remaining_effective = if (parsed) |p|
+        @max(p.total - processed_effective, 0)
+    else blk: {
+        const percent_fallback: u32 = if (state.percent > 0)
+            if (state.percent >= 100) 100 else state.percent
+        else
+            @as(u32, if (processed_effective > 0) 1 else 0);
+
+        var estimated_total = processed_effective;
+        if (percent_fallback > 0) {
+            var est = @divTrunc(processed_effective * 100, @as(i64, @intCast(percent_fallback)));
+            if (est < processed_effective) est = processed_effective;
+            estimated_total = est;
+        }
+
+        break :blk @max(estimated_total - processed_effective, 0);
+    };
+
+    const percent_effective: u32 = if (parsed) |p| blk: {
+        const capped_processed = @min(processed_effective, p.total);
+        var pct = @as(u32, @intCast(@divTrunc(capped_processed * 100, p.total)));
+        if (pct > 99 and capped_processed < p.total) pct = 99;
+        break :blk pct;
+    } else if (state.percent > 0)
+        if (state.percent >= 100) 100 else state.percent
+    else
+        @as(u32, if (processed_effective > 0) 1 else 0);
+
+    const columns = ui.terminalWidthColumns();
+    const status_prefix_len = "  Carpeta: ".len;
+    const status_max = if (columns > status_prefix_len) columns - status_prefix_len else 0;
+    var status_buf: [512]u8 = undefined;
+    const safe_status = ui.truncateWithEllipsis(status, &status_buf, status_max);
+
+    std.debug.print("\r\x1b[2K  \x1b[90mCarpeta:\x1b[0m {s}\n", .{safe_status});
+    ui.printProgressBar(percent_effective, "Transfiriendo");
+
+    var size_buf: [32]u8 = undefined;
+    const size_str = import_utils.formatBytesShort(&size_buf, state.size_bytes);
+
+    std.debug.print("\n\x1b[2K  \x1b[90mProc:\x1b[0m {d} ({s})", .{ processed_effective, size_str });
+    std.debug.print("\n\x1b[2K  \x1b[90mCop:\x1b[0m  {d}", .{state.copied});
+    std.debug.print("\n\x1b[2K  \x1b[90mMov:\x1b[0m  {d}", .{state.moved});
+    std.debug.print("\n\x1b[2K  \x1b[90mOmi:\x1b[0m  {d}", .{state.skipped + state.failed});
+    std.debug.print("\n\x1b[2K  \x1b[90mRes:\x1b[0m  {d}", .{remaining_effective});
+
+    var elapsed_hms_buf: [32]u8 = undefined;
+    const elapsed_hms = import_utils.formatHms(&elapsed_hms_buf, @divTrunc(elapsed_ms, 1000));
+    std.debug.print("\n\x1b[2K  \x1b[90mT:\x1b[0m {s}", .{elapsed_hms});
+
+    var eta_str_buf: [32]u8 = undefined;
+    var eta_str: []const u8 = "--:--:--";
+    if (percent_effective > 0 and percent_effective < 100) {
+        const total_est_ms = @divTrunc(elapsed_ms * 100, @as(i64, @intCast(percent_effective)));
+        const eta_ms = @max(total_est_ms - elapsed_ms, 0);
+        eta_str = import_utils.formatHms(&eta_str_buf, @divTrunc(eta_ms, 1000));
+    } else if (percent_effective >= 100) {
+        eta_str = "00:00:00";
+    }
+
+    std.debug.print("  \x1b[90mETA:\x1b[0m {s}", .{eta_str});
+    std.debug.print("\r", .{});
 }
 
 pub fn printTransferResult(parsed: *const ParsedTransferOutput, elapsed_total: i64) void {
@@ -293,7 +570,10 @@ fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
 
     const value_start = pos;
     while (pos < json.len) {
-        if (json[pos] == '\\') { pos += 2; continue; }
+        if (json[pos] == '\\') {
+            pos += 2;
+            continue;
+        }
         if (json[pos] == '"') return json[value_start..pos];
         pos += 1;
     }

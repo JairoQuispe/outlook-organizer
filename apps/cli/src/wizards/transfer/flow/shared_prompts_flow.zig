@@ -1,12 +1,48 @@
 const std = @import("std");
 const ui = @import("../../../ui.zig");
 const types = @import("../types.zig");
+const prompts = @import("../../import_pst/prompts.zig");
+const routing_wizard = @import("../../import_pst/routing_wizard.zig");
 const shared_config_mod = @import("shared_config.zig");
 
-const SharedConfig = shared_config_mod.SharedConfig;
+pub const SharedConfig = shared_config_mod.SharedConfig;
 
 pub fn promptSharedConfig(allocator: std.mem.Allocator) !SharedConfig {
     var config = SharedConfig.initDefaults();
+
+    config.profile_name = prompts.chooseOutlookProfile(allocator) catch {
+        ui.failAbort("Error seleccionando perfil de Outlook");
+        return error.OperationAborted;
+    };
+
+    // Prompt for routing options
+    ui.clearScreen();
+    ui.printSectionTitle("Enrutamiento de Correos");
+    std.debug.print("  \x1b[90mDeseas enrutar los correos hacia multiples buzones segun sus fechas?\x1b[0m\n\n", .{});
+    std.debug.print("  \x1b[33mActivar Enrutamiento de Correos? (s/N) [N]:\x1b[0m ", .{});
+    config.enable_routing = ui.readYesNo(false);
+
+    if (config.enable_routing) {
+        const criterion = routing_wizard.selectRoutingCriterion() catch |err| {
+            if (err == error.Cancelled) return error.Cancelled;
+            ui.failAbort("Error seleccionando criterio de enrutamiento");
+            return error.OperationAborted;
+        };
+        config.routing_criterion = @as(types.RoutingCriterion, @enumFromInt(@intFromEnum(criterion)));
+    }
+
+    config.scan_mode = if (config.enable_routing) .deep else (block: {
+        const mode = prompts.chooseScanMode(allocator) catch {
+            ui.failAbort("Error leyendo modo de escaneo");
+            return error.OperationAborted;
+        };
+        break :block @as(types.ScanMode, @enumFromInt(@intFromEnum(mode)));
+    });
+
+    config.scan_filter_year = prompts.chooseScanYearFilter(allocator) catch {
+        ui.failAbort("Error leyendo filtro de anio para escaneo");
+        return error.OperationAborted;
+    };
 
     config.action = promptAction();
 

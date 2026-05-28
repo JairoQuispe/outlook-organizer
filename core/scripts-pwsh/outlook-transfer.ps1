@@ -552,6 +552,90 @@ function Get-StoreByIdOrPath {
     return $null
 }
 
+# --- Folder / path helpers ---
+
+function Normalize-FolderPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+    return $Path.Trim().Replace("/", "\").Trim("\").ToLowerInvariant()
+}
+
+function Normalize-FolderName {
+    param([string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return "" }
+
+    $v = $Name
+    try { $v = $v.Normalize([Text.NormalizationForm]::FormKC) } catch {}
+    $v = [regex]::Replace($v, "[\u00AD\u200B-\u200F\u2028-\u202F\uFEFF\u00A0]", "")
+    $v = [regex]::Replace($v, "\s+", " ")
+    $v = $v.Trim().ToLowerInvariant()
+    return $v
+}
+
+function Sanitize-FolderName {
+    param([string]$Name)
+
+    if ($null -eq $Name) { return "" }
+    $v = [string]$Name
+    $v = [regex]::Replace($v, "[\u00AD\u200B-\u200F\u2028-\u202F\uFEFF\u00A0]", "")
+    $v = [regex]::Replace($v, "\s+", " ").Trim()
+    if ([string]::IsNullOrWhiteSpace($v)) { return "(Sin nombre)" }
+    return $v
+}
+
+function Get-NormalizedFolderSegments {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return @() }
+
+    $clean = $Path.Trim().Replace("/", "\").Trim("\")
+    if ([string]::IsNullOrWhiteSpace($clean)) { return @() }
+
+    [string[]]$parts = $clean -split '\\'
+    $segments = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($p in $parts) {
+        $trimmed = $p.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+            $segments.Add($trimmed)
+        }
+    }
+
+    return ,$segments.ToArray()
+}
+
+function Get-FolderParentPathString {
+    param([string]$Path)
+    $segments = Get-NormalizedFolderSegments -Path $Path
+    if ($segments.Count -le 1) { return "" }
+    return ($segments[0..($segments.Count - 2)] -join "\")
+}
+
+function Should-ProcessFolder {
+    param([string]$FolderPath, [string[]]$SelectedFolders)
+    if (-not $SelectedFolders -or $SelectedFolders.Count -eq 0) { return $true }
+    $fp = Normalize-FolderPath $FolderPath
+    foreach ($sel in $SelectedFolders) {
+        if ($fp -eq $sel -or $fp.StartsWith("$sel\")) { return $true }
+    }
+    return $false
+}
+
+function Has-SelectedDescendant {
+    param([string]$FolderPath, [string[]]$SelectedFolders)
+    if (-not $SelectedFolders -or $SelectedFolders.Count -eq 0) { return $false }
+    $fp = Normalize-FolderPath $FolderPath
+    foreach ($sel in $SelectedFolders) {
+        if ($sel.StartsWith("$fp\")) { return $true }
+    }
+    return $false
+}
+
+function Get-SubFolders-Safe {
+    param($parentFolder)
+    try { return $parentFolder.Folders } catch { return @() }
+}
+
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
 
 # --- Filter initialization ---
@@ -720,90 +804,6 @@ $script:DupIndexCache = New-Object 'System.Collections.Generic.Dictionary[string
 $script:RuntimeDupKeys = New-Object 'System.Collections.Generic.HashSet[string]'
 $script:ChildFolderCache = New-Object 'System.Collections.Generic.Dictionary[string, System.Collections.Generic.Dictionary[string, object]]'
 $script:FailedFolderCreations = New-Object 'System.Collections.Generic.HashSet[string]'
-
-# --- Folder / path helpers ---
-
-function Get-SubFolders-Safe {
-    param($parentFolder)
-    try { return $parentFolder.Folders } catch { return @() }
-}
-
-function Normalize-FolderPath {
-    param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
-    return $Path.Trim().Replace("/", "\").Trim("\").ToLowerInvariant()
-}
-
-function Normalize-FolderName {
-    param([string]$Name)
-
-    if ([string]::IsNullOrWhiteSpace($Name)) { return "" }
-
-    $v = $Name
-    try { $v = $v.Normalize([Text.NormalizationForm]::FormKC) } catch {}
-    $v = [regex]::Replace($v, "[\u00AD\u200B-\u200F\u2028-\u202F\uFEFF\u00A0]", "")
-    $v = [regex]::Replace($v, "\s+", " ")
-    $v = $v.Trim().ToLowerInvariant()
-    return $v
-}
-
-function Sanitize-FolderName {
-    param([string]$Name)
-
-    if ($null -eq $Name) { return "" }
-    $v = [string]$Name
-    $v = [regex]::Replace($v, "[\u00AD\u200B-\u200F\u2028-\u202F\uFEFF\u00A0]", "")
-    $v = [regex]::Replace($v, "\s+", " ").Trim()
-    if ([string]::IsNullOrWhiteSpace($v)) { return "(Sin nombre)" }
-    return $v
-}
-
-function Get-NormalizedFolderSegments {
-    param([string]$Path)
-
-    if ([string]::IsNullOrWhiteSpace($Path)) { return @() }
-
-    $clean = $Path.Trim().Replace("/", "\").Trim("\")
-    if ([string]::IsNullOrWhiteSpace($clean)) { return @() }
-
-    [string[]]$parts = $clean -split '\\'
-    $segments = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($p in $parts) {
-        $trimmed = $p.Trim()
-        if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
-            $segments.Add($trimmed)
-        }
-    }
-
-    return ,$segments.ToArray()
-}
-
-function Get-FolderParentPathString {
-    param([string]$Path)
-    $segments = Get-NormalizedFolderSegments -Path $Path
-    if ($segments.Count -le 1) { return "" }
-    return ($segments[0..($segments.Count - 2)] -join "\")
-}
-
-function Should-ProcessFolder {
-    param([string]$FolderPath, [string[]]$SelectedFolders)
-    if (-not $SelectedFolders -or $SelectedFolders.Count -eq 0) { return $true }
-    $fp = Normalize-FolderPath $FolderPath
-    foreach ($sel in $SelectedFolders) {
-        if ($fp -eq $sel -or $fp.StartsWith("$sel\")) { return $true }
-    }
-    return $false
-}
-
-function Has-SelectedDescendant {
-    param([string]$FolderPath, [string[]]$SelectedFolders)
-    if (-not $SelectedFolders -or $SelectedFolders.Count -eq 0) { return $false }
-    $fp = Normalize-FolderPath $FolderPath
-    foreach ($sel in $SelectedFolders) {
-        if ($sel.StartsWith("$fp\")) { return $true }
-    }
-    return $false
-}
 
 function Format-Bytes {
     param ($bytes)
