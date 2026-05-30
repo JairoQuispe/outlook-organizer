@@ -749,3 +749,105 @@ select:focus {
     color: #aaaaaa !important;
   }
 }
+
+/* Lista de Automatizaciones */
+.list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.list-header h3 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  color: #111111;
+}
+
+#automation-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.automation-card {
+  background-color: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.automation-card .card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.automation-card .card-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #666666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.automation-card .card-value {
+  font-size: 13px;
+  color: #333333;
+  word-break: break-all;
+}
+
+.automation-card .card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.automation-card .delete-btn {
+  background: transparent;
+  border: 1px solid #e0e0e0;
+  color: #a80000;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.automation-card .delete-btn:hover {
+  background-color: #fde7e9;
+  border-color: #a80000;
+}
+
+@media (prefers-color-scheme: dark) {
+  .list-header h3 {
+    color: #ffffff;
+  }
+
+  .automation-card {
+    background-color: #2b2b2b;
+    border-color: #3f3f3f;
+  }
+
+  .automation-card .card-label {
+    color: #aaaaaa;
+  }
+
+  .automation-card .card-value {
+    color: #dddddd;
+  }
+
+  .automation-card .delete-btn {
+    border-color: #5f3f43;
+    color: #f1707a;
+  }
+
+  .automation-card .delete-btn:hover {
+    background-color: #3f2a2d;
+    border-color: #f1707a;
+  }
+}

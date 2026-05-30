@@ -1,0 +1,31 @@
+          <div class="search-mailbox-container">
+            <button type="button" id="btn-scan-search-mailbox" class="primary-btn-large" style="padding: 10px 20px; font-size: 13.5px; width: 100%; margin-bottom: 15px;">🔍 Buscar Buzón (OST)</button>
+            <div id="scan-mailbox-loading" class="mailbox-loading hidden">
+              <span class="spinner">⏳</span> Buscando buzones en Outlook, por favor espere...
+            </div>
+            <div id="scan-mailbox-list-container" class="mailbox-list-container hidden">
+              <label>Seleccione el buzón a analizar:</label>
+              <div id="scan-mailbox-list" class="mailbox-list"></div>
+            </div>
+          </div>
+
+          <button type="button" id="btn-analyze" class="primary-btn" style="margin-top: 18px; width: 100%;" disabled>Analizar</button>
+
+          <!-- Progreso del escaneo -->
+          <div id="scan-progress-container" class="scan-progress-container hidden">
+            <div class="scan-progress-header">
+              <span id="scan-progress-status">Iniciando análisis...</span>
+              <span id="scan-progress-percent">0%</span>
+            </div>
+            <div class="scan-progress-bar">
+              <div id="scan-progress-fill" class="scan-progress-fill" style="width: 0%;"></div>
+            </div>
+            <div class="scan-progress-meta">
+              <span id="scan-progress-folders">Carpetas: 0 / 0</span>
+              <span id="scan-progress-items">Elementos: 0</span>
+            </div>
+            <div id="scan-progress-current" class="scan-progress-current"></div>
+          </div>
+
+          <!-- Resultado del escaneo -->
+          <div id="scan-result-container" class="scan-result-container hidden"></div>

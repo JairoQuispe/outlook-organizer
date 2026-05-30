@@ -1,0 +1,110 @@
+      <!-- Indicador de pasos -->
+      <div class="wizard-steps-indicator">
+        <div class="step-indicator active" data-step="1">1<span class="step-label">Origen</span></div>
+        <div class="step-line"></div>
+        <div class="step-indicator" data-step="2">2<span class="step-label">Destino</span></div>
+        <div class="step-line"></div>
+        <div class="step-indicator" data-step="3">3<span class="step-label">Programación</span></div>
+      </div>
+
+      <!-- Paso 1: Origen de datos -->
+      <div class="wizard-step-content active" id="wizard-step-1">
+        <h3>Paso 1: Seleccione su buzón y frecuencia de análisis</h3>
+        <p>Buscaremos los buzones configurados en su Outlook y elegiremos la periodicidad con la que analizaremos su espacio.</p>
+        
+        <div class="search-mailbox-container">
+          <button type="button" id="btn-search-mailbox" class="primary-btn-large" style="padding: 10px 20px; font-size: 13.5px; width: 100%; margin-bottom: 15px;">🔍 Buscar Buzón (OST)</button>
+          <div id="mailbox-loading" class="mailbox-loading hidden">
+            <span class="spinner">⏳</span> Buscando buzones en Outlook, por favor espere...
+          </div>
+          <div id="mailbox-list-container" class="mailbox-list-container hidden">
+            <label>Seleccione el buzón de correo a respaldar:</label>
+            <div id="mailbox-list" class="mailbox-list">
+              <!-- Se cargará dinámicamente -->
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 15px;">
+          <label for="wizard-analysis-frequency">Analizar el espacio del buzón cada:</label>
+          <select id="wizard-analysis-frequency" style="width: 100%;">
+            <option value="weekly">1 vez a la semana</option>
+            <option value="monthly">1 vez al mes</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Paso 2: Destino de respaldo -->
+      <div class="wizard-step-content hidden" id="wizard-step-2">
+        <h3>Paso 2: Seleccione el buzón de destino</h3>
+        <p>Buscaremos un segundo buzón de tipo OST en Outlook para almacenar los elementos respaldados (excluyendo el buzón de origen).</p>
+        
+        <!-- Búsqueda dinámica de buzón de destino -->
+        <div class="search-mailbox-container">
+          <button type="button" id="btn-search-destination-mailbox" class="primary-btn-large" style="padding: 10px 20px; font-size: 13.5px; width: 100%; margin-bottom: 15px;">🔍 Buscar Buzón de Destino (OST)</button>
+          <div id="mailbox-destination-loading" class="mailbox-loading hidden">
+            <span class="spinner">⏳</span> Buscando buzones disponibles en Outlook, por favor espere...
+          </div>
+          <div id="mailbox-destination-list-container" class="mailbox-list-container hidden">
+            <label>Seleccione el buzón de destino para almacenar el respaldo:</label>
+            <div id="mailbox-destination-list" class="mailbox-list">
+              <!-- Se cargará dinámicamente -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Fila con Criterio de Respaldo y Condición Dinámica -->
+        <div class="form-row" style="margin-top: 20px;">
+          <div class="form-group col">
+            <label for="wizard-criterion">Criterio de Respaldo</label>
+            <select id="wizard-criterion">
+              <option value="copy">Copiar archivo</option>
+              <option value="move">Mover archivo (Liberar espacio)</option>
+            </select>
+          </div>
+
+          <!-- Campo dinámico para 'Mover' -->
+          <div class="form-group col hidden" id="wizard-trigger-condition-container">
+            <label for="wizard-trigger-condition">Detectar cuando</label>
+            <select id="wizard-trigger-condition">
+              <option value="80">Tamaño del buzón > 80%</option>
+              <option value="90">Tamaño del buzón > 90%</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Paso 3: Resumen de Configuración -->
+      <div class="wizard-step-content hidden" id="wizard-step-3">
+        <h3>Paso 3: Resumen de Configuración</h3>
+        <p>Por favor, revise que toda la información de su automatización de respaldo sea correcta antes de activarla.</p>
+        
+        <div class="summary-container" style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 15px; margin-top: 15px;">
+          <div class="summary-item" style="margin-bottom: 12px; border-bottom: 1px solid #f3f4f6; padding-bottom: 8px;">
+            <span style="font-weight: 600; color: #374151; display: block; font-size: 12.5px;">Buzón de Origen (A respaldar):</span>
+            <span id="summary-source" style="font-size: 12px; color: #4b5563; word-break: break-all;">No seleccionado</span>
+          </div>
+          
+          <div class="summary-item" style="margin-bottom: 12px; border-bottom: 1px solid #f3f4f6; padding-bottom: 8px;">
+            <span style="font-weight: 600; color: #374151; display: block; font-size: 12.5px;">Frecuencia de Análisis:</span>
+            <span id="summary-analysis-frequency" style="font-size: 12px; color: #4b5563;">No seleccionada</span>
+          </div>
+
+          <div class="summary-item" style="margin-bottom: 12px; border-bottom: 1px solid #f3f4f6; padding-bottom: 8px;">
+            <span style="font-weight: 600; color: #374151; display: block; font-size: 12.5px;">Buzón de Destino:</span>
+            <span id="summary-destination" style="font-size: 12px; color: #4b5563; word-break: break-all;">No seleccionado</span>
+          </div>
+
+          <div class="summary-item" style="margin-bottom: 5px;">
+            <span style="font-weight: 600; color: #374151; display: block; font-size: 12.5px;">Criterio de Respaldo:</span>
+            <span id="summary-criterion" style="font-size: 12px; color: #4b5563;">No seleccionado</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Acciones de Navegación del Asistente -->
+      <div class="wizard-actions">
+        <button type="button" id="btn-wizard-back" class="secondary-btn hidden">Atrás</button>
+        <button type="button" id="btn-wizard-next" class="primary-btn">Siguiente</button>
+        <button type="button" id="btn-wizard-cancel" class="cancel-link">Cancelar</button>
+      </div>
